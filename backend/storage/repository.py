@@ -33,7 +33,7 @@ from backend.models.domain import (
     BranchStock,
     round_curr,
 )
-from backend.models.exceptions import InsufficientStockError, ProductNotFoundError
+from backend.models.exceptions import InsufficientStockError, ProductNotFoundError, POSTransactionError
 from backend.storage.db import DatabaseManager
 
 
@@ -222,12 +222,25 @@ class RetailRepository:
         curr_stock = row["stock_quantity"]
         p_row = conn.execute("SELECT name FROM products WHERE barcode = ?;", (barcode.strip(),)).fetchone()
         name = p_row["name"] if p_row else barcode
+        if quantity <= 0:
+            raise POSTransactionError(
+                f"Quantity must be a positive integer for item '{name}'.", code="INVALID_QUANTITY"
+            )
         if curr_stock < quantity:
             raise InsufficientStockError(barcode, name, curr_stock, quantity)
 
         new_stock = curr_stock - quantity
-        conn.execute("UPDATE branch_inventory SET stock_quantity = ?, updated_at = ? WHERE branch_id = ? AND barcode = ?;",
-                     (new_stock, datetime.now().isoformat(), branch_id.strip(), barcode.strip()))
+        updated = conn.execute(
+            "UPDATE branch_inventory SET stock_quantity = ?, updated_at = ? "
+            "WHERE branch_id = ? AND barcode = ? AND stock_quantity = ?;",
+            (new_stock, datetime.now().isoformat(), branch_id.strip(), barcode.strip(), curr_stock),
+        )
+        if updated.rowcount != 1:
+            # Optimistic-lock failure: another transaction changed this row.
+            raise POSTransactionError(
+                f"Concurrent stock update detected for '{name}'. Please retry the sale.",
+                code="STOCK_CONFLICT",
+            )
 
         # Also decrement master product stock for single-store fallback / overall catalog view
         conn.execute("UPDATE products SET stock_quantity = MAX(0, stock_quantity - ?) WHERE barcode = ?;", (quantity, barcode.strip()))
@@ -1389,3 +1402,16 @@ class RetailRepository:
                 "total_tax": float(round_curr(Decimal(str(order_row["total_tax"] or 0.0)))),
                 "branch_breakdown": branch_breakdown
             }
+
+    # ========================================================================
+    # SECURE CREDENTIAL HELPERS
+    # ========================================================================
+    def upgrade_user_pin_hash(self, user_id: str, new_hashed_pin: str) -> None:
+        """
+        Persist an upgraded (bcrypt/PBKDF2 hashed) credential for a user whose
+        legacy plaintext PIN successfully authenticated. Never call with raw
+        secrets -- hash them first via backend.security.normalize_for_storage.
+        """
+        sql = "UPDATE users SET pin = ? WHERE id = ?;"
+        with self.db.connection() as conn:
+            conn.execute(sql, (new_hashed_pin, user_id))

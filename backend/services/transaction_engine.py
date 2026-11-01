@@ -46,6 +46,10 @@ from backend.services.inventory_pq import InventoryPriorityQueue
 from backend.services.cache_service import LRUCacheService
 from backend.storage.repository import RetailRepository
 
+# Input bounds: hard limits that stop abusive payloads (mass-tampering / DoS).
+MAX_CHECKOUT_QTY_PER_ITEM = 1000
+MAX_CART_LINE_ITEMS = 200
+
 
 class POSTransactionEngine:
     """
@@ -102,13 +106,42 @@ class POSTransactionEngine:
             b_name = "Indirapuram Flagship"
 
         # --- STEP 1: PRE-FLIGHT VALIDATION (Catalog & Stock Check) ---
+        # NOTE: This pass only rejects unknown barcodes and obviously absurd
+        # quantities. The authoritative stock check happens INSIDE the atomic
+        # transaction below (deduct_branch_stock_atomic), which re-reads and
+        # decrements rows under BEGIN IMMEDIATE -- closing the TOCTOU window
+        # where two concurrent cashiers could oversell the same shelf stock.
         consolidated_items: Dict[str, int] = {}
         for itm in raw_items:
-            barcode = itm.get("barcode", "").strip()
-            qty = int(itm.get("quantity", 1))
+            barcode = str(itm.get("barcode", "")).strip()
+            try:
+                qty = int(itm.get("quantity", 1))
+            except (TypeError, ValueError):
+                raise POSTransactionError(
+                    f"Invalid quantity for item '{barcode}'. Quantities must be whole numbers.",
+                    code="INVALID_QUANTITY",
+                )
             if qty <= 0:
                 continue
+            if qty > MAX_CHECKOUT_QTY_PER_ITEM:
+                raise POSTransactionError(
+                    f"Quantity {qty} for item '{barcode}' exceeds the per-item limit of "
+                    f"{MAX_CHECKOUT_QTY_PER_ITEM}. Split the sale or use a purchase order.",
+                    code="QUANTITY_LIMIT_EXCEEDED",
+                )
+            if not barcode:
+                raise POSTransactionError("Cart contains an item without a barcode.", code="EMPTY_BARCODE")
             consolidated_items[barcode] = consolidated_items.get(barcode, 0) + qty
+
+        if len(consolidated_items) > MAX_CART_LINE_ITEMS:
+            raise POSTransactionError(
+                f"Cart has more than {MAX_CART_LINE_ITEMS} distinct items.", code="CART_TOO_LARGE"
+            )
+        if any(qty > MAX_CHECKOUT_QTY_PER_ITEM for qty in consolidated_items.values()):
+            raise POSTransactionError(
+                f"Combined quantity for a single item exceeds the limit of {MAX_CHECKOUT_QTY_PER_ITEM}.",
+                code="QUANTITY_LIMIT_EXCEEDED",
+            )
 
         if not consolidated_items:
             raise POSTransactionError("No valid item quantities in cart.", code="EMPTY_CART")

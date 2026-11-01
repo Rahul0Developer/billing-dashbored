@@ -1,34 +1,8 @@
-# Byte-compiled / optimized / DLL files
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-
-# Environments
 .env
-.venv
-env/
-venv/
-ENV/
-
-# Testing & Coverage
-.pytest_cache/
-.coverage
-htmlcov/
-
-# Editor & OS files
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-.DS_Store
-Thumbs.db
-
-# SQLite temp / journal files
-*.db-wal
-*.db-shm
-*.db-journal
-
-# Temporary runtime logs
-*.log
+.env.local
+.env.*.local
+*.key
+*.pem
+*.crt
+*.secret
+data/.pos_secret_key
