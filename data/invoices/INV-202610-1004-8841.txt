@@ -1,0 +1,37 @@
+══════════════════════════════════════════════════════════════════════════════
+                      APEX ENTERPRISE TECHNOLOGIES INC.                       
+ 100 Innovation Boulevard, Suite 500, San Francisco, CA 94107 
+ Tax ID: TAX-EIN-992144510 | Tel: +1 (800) 555-APEX | https://apexenterprise.io 
+══════════════════════════════════════════════════════════════════════════════
+ INVOICE NUMBER: INV-202610-1004-8841      STATUS:   [PARTIALLY_PAID]
+ ISSUE DATE:     2026-10-31                DUE DATE:  2026-11-30
+ CURRENCY:       USD                       TERMS:     Net-30 Commercial
+──────────────────────────────────────────────────────────────────────────────
+ BILLED TO:
+   Acme Global Corporation (Attn: Alexander Vance)
+   450 Mission Street, Floor 18, San Francisco, CA 94105, USA
+   Tax / GST ID: US-EIN-129845110 | Account ID: CUST-1001
+   Customer Tier: ENTERPRISE
+──────────────────────────────────────────────────────────────────────────────
+ #   SKU          DESCRIPTION                QTY      UNIT   DISC        TOTAL
+------------------------------------------------------------------------------
+ 1   SKU-SRV-001  Cloud Dedicated Compute      2 $  450.00   5.0% $     925.54
+ 2   SKU-SUP-002  24/7 Enterprise Tier-1 S     1 $ 1200.00      - $    1299.00
+------------------------------------------------------------------------------
+                                                     Subtotal: $     2100.00
+                                               Line Discounts: -$      45.00
+                                             Order Concession: -$      50.00
+                                          Estimated Sales Tax: +$     169.54
+                                                  GRAND TOTAL: $     2174.54
+------------------------------------------------------------------------------
+ PAYMENTS RECORDED:
+   [2026-10-31] Ref: WIRE-LIVE-DEMO-991 Via: BANK_TRANSFER Paid: $1087.27
+------------------------------------------------------------------------------
+                                                   Total Paid: $     1087.27
+                                                  BALANCE DUE: $     1087.27
+══════════════════════════════════════════════════════════════════════════════
+ NOTES / CLAUSES: Enterprise Q4 Hybrid Infrastructure Expansion
+ REMITTANCE INSTRUCTIONS:
+   Bank: Silicon Valley Corporate Bank | Routing: 121000358 | Account: 998822104
+   Please quote the invoice number on all remittances.
+══════════════════════════════════════════════════════════════════════════════

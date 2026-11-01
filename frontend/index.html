@@ -1,0 +1,1849 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Apex Enterprise Retail POS & Operations</title>
+  <link rel="stylesheet" href="/static/css/styles.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <!-- Chart.js for Executive Dashboards -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+
+  <div class="app-shell">
+    
+    <!-- =================================================================== -->
+    <!-- LEFT SIDEBAR NAVIGATION (Enterprise POS & ERP Style)                -->
+    <!-- =================================================================== -->
+    <aside class="app-sidebar">
+      <div class="sidebar-brand">
+        <div class="brand-logo-circle">
+          <i class="fa-solid fa-cart-shopping"></i>
+        </div>
+        <div class="brand-text">
+          <h2>APEX RETAIL</h2>
+          <span class="store-badge-tag">ENTERPRISE POS</span>
+        </div>
+      </div>
+
+      <div class="store-location-info">
+        <i class="fa-solid fa-store"></i>
+        <div>
+          <strong id="sidebar-branch-name">Indirapuram Flagship</strong>
+          <small id="sidebar-branch-code">Branch ID: BR-DEL-01</small>
+        </div>
+      </div>
+
+      <nav class="sidebar-nav">
+        <div class="nav-section-label">OPERATIONS</div>
+        <button class="nav-item active" data-tab="tab-pos">
+          <i class="fa-solid fa-cash-register"></i>
+          <span>POS Billing Counter</span>
+        </button>
+        <button class="nav-item" data-tab="tab-sales">
+          <i class="fa-solid fa-receipt"></i>
+          <span>Sales & Invoices</span>
+        </button>
+        <button class="nav-item" data-tab="tab-shifts">
+          <i class="fa-solid fa-vault"></i>
+          <span>Register Shifts & Z-Report</span>
+        </button>
+
+        <div class="nav-section-label">MANAGEMENT</div>
+        <button class="nav-item" data-tab="tab-dashboard">
+          <i class="fa-solid fa-chart-line"></i>
+          <span>Store BI & P&L</span>
+        </button>
+        <button class="nav-item" data-tab="tab-branches">
+          <i class="fa-solid fa-network-wired"></i>
+          <span>Multi-Branch Stores</span>
+        </button>
+        <button class="nav-item" data-tab="tab-inventory">
+          <i class="fa-solid fa-boxes-stacked"></i>
+          <span>Inventory & Stock</span>
+        </button>
+        <button class="nav-item" data-tab="tab-customers">
+          <i class="fa-solid fa-users"></i>
+          <span>Customer Footfall</span>
+        </button>
+        <button class="nav-item" data-tab="tab-expenses">
+          <i class="fa-solid fa-file-invoice-dollar"></i>
+          <span>Expenses Tracker</span>
+        </button>
+        <button class="nav-item" data-tab="tab-reports">
+          <i class="fa-solid fa-file-export"></i>
+          <span>Data Exports</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="system-status">
+          <span class="status-indicator online"></span>
+          <span>Online (SQLite Engine)</span>
+        </div>
+        <div class="version-tag">Apex POS v3.0 Enterprise</div>
+      </div>
+    </aside>
+
+    <!-- =================================================================== -->
+    <!-- MAIN CONTAINER WITH TOP BAR & TAB CONTENT                          -->
+    <!-- =================================================================== -->
+    <div class="app-main-viewport">
+      
+      <!-- TOP HEADER BAR -->
+      <header class="app-topbar">
+        <div class="topbar-left">
+          <div class="view-title">
+            <h1 id="current-view-title">POS Billing Counter</h1>
+            <p id="current-view-desc">High-speed barcode scanning & retail checkout</p>
+          </div>
+        </div>
+
+        <div class="topbar-right">
+          <!-- Active Store Branch Switcher -->
+          <div class="branch-selector-wrapper" title="Active Store Branch (Affects POS billing, inventory, and shift accounting)">
+            <i class="fa-solid fa-shop"></i>
+            <select id="active-branch-select" class="branch-select">
+              <option value="BR-DEL-01">Indirapuram Flagship (BR-DEL-01)</option>
+              <option value="BR-MUM-02">Bandra West Hub (BR-MUM-02)</option>
+              <option value="BR-BLR-03">Whitefield Tech Hub (BR-BLR-03)</option>
+            </select>
+          </div>
+
+          <!-- Active Cashier Switcher -->
+          <div class="user-selector-wrapper">
+            <i class="fa-solid fa-user-tie"></i>
+            <select id="active-user-select" class="user-select">
+              <option value="CASHIER-01|Rajesh Sharma|CASHIER">Rajesh Sharma (Cashier)</option>
+              <option value="CASHIER-02|Priya Patel|CASHIER">Priya Patel (Cashier)</option>
+              <option value="MGR-01|Vikram Malhotra|STORE_MANAGER">Vikram Malhotra (Store Mgr)</option>
+              <option value="ADMIN-01|Super Admin|ADMIN">System Admin (Full Access)</option>
+            </select>
+          </div>
+
+          <!-- Live Digital Clock -->
+          <div class="clock-badge">
+            <i class="fa-regular fa-clock"></i>
+            <span id="live-clock">10:30:00 AM</span>
+          </div>
+
+          <!-- Light / Dark Mode Toggle -->
+          <button id="theme-toggle-btn" class="theme-toggle-btn" title="Toggle Light/Dark Theme">
+            <i class="fa-solid fa-moon"></i>
+          </button>
+        </div>
+      </header>
+
+      <!-- CONTENT PANES -->
+      <main class="content-scroll-container">
+
+        <!-- =============================================================== -->
+        <!-- TAB 1: POINT OF SALE (POS) BILLING COUNTER                      -->
+        <!-- =============================================================== -->
+        <section id="tab-pos" class="tab-pane active">
+          <div class="pos-workspace">
+            
+            <!-- LEFT SHELF & SEARCH PANEL -->
+            <div class="pos-catalog-panel">
+              <!-- Barcode & Item Search Box with Instant Autocomplete -->
+              <div class="search-input-container">
+                <i class="fa-solid fa-barcode barcode-lead-icon"></i>
+                <input 
+                  type="text" 
+                  id="barcode-input" 
+                  placeholder="Scan Barcode or type Product Name (e.g. 8901030..., Atta, Amul, Maggi, Shirt)..." 
+                  autocomplete="off"
+                  autofocus
+                >
+                <button id="clear-search-btn" class="search-clear-btn" title="Clear">&times;</button>
+                <div id="trie-suggestions" class="search-autocomplete-popup hidden"></div>
+              </div>
+
+              <!-- Category Filter Pills -->
+              <div class="category-filter-bar">
+                <button class="cat-chip active" data-cat="ALL">All Items</button>
+                <button class="cat-chip" data-cat="Groceries">🌾 Groceries & Staples</button>
+                <button class="cat-chip" data-cat="Dairy">🥛 Dairy & Cold</button>
+                <button class="cat-chip" data-cat="Snacks">🍿 Snacks & Biscuits</button>
+                <button class="cat-chip" data-cat="Beverages">🥤 Beverages</button>
+                <button class="cat-chip" data-cat="Household">🧼 Household</button>
+                <button class="cat-chip" data-cat="Personal Care">🧴 Personal Care</button>
+                <button class="cat-chip" data-cat="Apparel">👕 Apparel (V2/Trends)</button>
+              </div>
+
+              <!-- Product Shelf Grid -->
+              <div class="shelf-grid-wrapper">
+                <div id="products-grid" class="products-grid">
+                  <!-- Rendered dynamically -->
+                </div>
+              </div>
+            </div>
+
+            <!-- RIGHT BILLING & CART PANEL -->
+            <div class="pos-billing-panel">
+              
+              <!-- Customer Identification & Smart Recognition Card -->
+              <div class="customer-footfall-card">
+                <div class="footfall-header">
+                  <div class="header-tag">
+                    <i class="fa-solid fa-address-card"></i>
+                    <span>Smart Customer Recognition</span>
+                  </div>
+                  <div class="header-badges">
+                    <span id="cust-returning-pill" class="returning-badge hidden">RETURNING</span>
+                    <span id="cust-tier-pill" class="tier-chip-badge hidden">BRONZE</span>
+                  </div>
+                </div>
+
+                <div class="customer-input-row">
+                  <div class="phone-input-wrap">
+                    <span class="country-prefix"><i class="fa-solid fa-id-badge"></i></span>
+                    <input type="text" id="customer-phone-input" placeholder="Mobile (+91) or Scan Member QR (MEM-xxx)...">
+                  </div>
+                  <button id="lookup-customer-btn" class="btn-check-customer" title="Identify Customer">
+                    <i class="fa-solid fa-magnifying-glass"></i>
+                  </button>
+                  <button id="btn-open-qr-scanner" class="btn-check-customer qr-trigger" title="Scan Membership QR Code">
+                    <i class="fa-solid fa-qrcode"></i>
+                  </button>
+                </div>
+
+                <!-- Footfall History Banner -->
+                <div id="customer-profile-banner" class="customer-summary-box hidden">
+                  <div class="customer-main-line">
+                    <div>
+                      <strong id="cust-disp-name">Rahul Sharma</strong>
+                      <span class="membership-id-pill" id="cust-disp-code">MEM-9810188442</span>
+                    </div>
+                    <span class="days-ago-tag" id="cust-days-ago">Visited 2 days ago</span>
+                  </div>
+                  <div class="customer-stats-grid">
+                    <div class="cust-stat-item">
+                      <span class="stat-label">Store Visits</span>
+                      <strong class="stat-val highlight" id="cust-visit-count">14 Times</strong>
+                    </div>
+                    <div class="cust-stat-item">
+                      <span class="stat-label">Reward Points</span>
+                      <strong class="stat-val" id="cust-loyalty-pts">184 Pts (₹184)</strong>
+                    </div>
+                    <div class="cust-stat-item">
+                      <span class="stat-label">Tier Perk</span>
+                      <strong class="stat-val discount-val" id="cust-tier-disc">2.5% OFF</strong>
+                    </div>
+                  </div>
+                  <div class="customer-quick-actions">
+                    <button type="button" class="cust-action-pill" id="btn-view-cust-history">
+                      <i class="fa-solid fa-clock-rotate-left"></i> History & Invoices
+                    </button>
+                    <button type="button" class="cust-action-pill" id="btn-view-cust-habits">
+                      <i class="fa-solid fa-chart-pie"></i> Habits & Favorites
+                    </button>
+                    <button type="button" class="cust-action-pill" id="btn-view-cust-card">
+                      <i class="fa-solid fa-qrcode"></i> Member QR
+                    </button>
+                  </div>
+                  <div class="points-redeem-row" id="points-redeem-container">
+                    <label>
+                      <input type="checkbox" id="redeem-points-chk">
+                      <span>Redeem loyalty points against bill</span>
+                    </label>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Cart Line Items Table -->
+              <div class="cart-table-container">
+                <table class="cart-table">
+                  <thead>
+                    <tr>
+                      <th style="width: 44%;">Item Description</th>
+                      <th class="text-center" style="width: 20%;">Qty</th>
+                      <th class="text-right" style="width: 16%;">Price</th>
+                      <th class="text-right" style="width: 14%;">Total</th>
+                      <th class="text-center" style="width: 6%;"></th>
+                    </tr>
+                  </thead>
+                  <tbody id="cart-tbody">
+                    <!-- Inserted via JS -->
+                  </tbody>
+                </table>
+                <div id="empty-cart-state" class="empty-cart-view">
+                  <i class="fa-solid fa-basket-shopping empty-icon"></i>
+                  <h4>Billing Cart is Empty</h4>
+                  <p>Scan barcode, click shelf products, or search to start billing</p>
+                </div>
+              </div>
+
+              <!-- Cart Calculation Breakdown -->
+              <div class="bill-calculation-summary">
+                <div class="summary-line">
+                  <span>Subtotal:</span>
+                  <span id="cart-subtotal">₹0.00</span>
+                </div>
+                <div class="summary-line savings-line">
+                  <span><i class="fa-solid fa-tag"></i> Store MRP Savings:</span>
+                  <span id="cart-savings">- ₹0.00</span>
+                </div>
+                <div class="summary-line discount-line hidden" id="tier-discount-row">
+                  <span>Loyalty Tier Benefit:</span>
+                  <span id="cart-tier-discount">- ₹0.00</span>
+                </div>
+                <div class="summary-line discount-line hidden" id="vol-discount-row">
+                  <span>Volume Slab Offer:</span>
+                  <span id="cart-vol-discount">- ₹0.00</span>
+                </div>
+                <div class="summary-line discount-line hidden" id="points-discount-row">
+                  <span>Points Redeemed:</span>
+                  <span id="cart-points-discount">- ₹0.00</span>
+                </div>
+                <div class="summary-line tax-line">
+                  <span>Taxes (CGST + SGST Included):</span>
+                  <span id="cart-tax">₹0.00</span>
+                </div>
+                <div class="summary-grand-total">
+                  <span>NET PAYABLE:</span>
+                  <span id="cart-grand-total">₹0.00</span>
+                </div>
+              </div>
+
+              <!-- Payment Tender Selector & Actions -->
+              <div class="payment-checkout-section">
+                <div class="payment-modes-bar">
+                  <button class="pay-chip active" data-method="CASH">
+                    <i class="fa-solid fa-money-bill-1-wave"></i> Cash
+                  </button>
+                  <button class="pay-chip" data-method="UPI_QR">
+                    <i class="fa-solid fa-qrcode"></i> UPI QR
+                  </button>
+                  <button class="pay-chip" data-method="CREDIT_DEBIT_CARD">
+                    <i class="fa-solid fa-credit-card"></i> Card
+                  </button>
+                  <button class="pay-chip" data-method="SPLIT">
+                    <i class="fa-solid fa-layer-group"></i> Split
+                  </button>
+                </div>
+
+                <!-- Cash Tender Calculation Area -->
+                <div id="cash-tender-area" class="tender-calculator">
+                  <div class="tender-field">
+                    <label>Cash Tendered by Customer (₹):</label>
+                    <input type="number" id="tendered-cash-input" placeholder="0.00" step="10">
+                  </div>
+                  <div class="change-field">
+                    <label>Change to Return:</label>
+                    <div id="change-returned-val" class="change-display">₹0.00</div>
+                  </div>
+                </div>
+
+                <!-- Split Tender Area -->
+                <div id="split-tender-area" class="tender-calculator hidden">
+                  <div class="tender-field">
+                    <label>Cash Portion (₹):</label>
+                    <input type="number" id="split-cash-input" placeholder="0.00" step="10">
+                  </div>
+                  <div class="tender-field">
+                    <label>Digital (UPI/Card) Portion (₹):</label>
+                    <input type="number" id="split-digital-input" placeholder="0.00" readonly>
+                  </div>
+                </div>
+
+                <!-- UPI QR Area -->
+                <div id="upi-qr-area" class="upi-display-box hidden">
+                  <div class="upi-mock-container">
+                    <i class="fa-solid fa-qrcode upi-qr-icon"></i>
+                    <p>Dynamic GST-Compliant UPI QR Code</p>
+                    <span id="upi-amount-display" class="upi-amount-tag">₹0.00</span>
+                  </div>
+                </div>
+
+                <!-- Complete Transaction Button -->
+                <button id="complete-sale-btn" class="btn-primary-checkout" disabled>
+                  <i class="fa-solid fa-receipt"></i> COMPLETE SALE & PRINT RECEIPT [F9]
+                </button>
+              </div>
+
+            </div>
+          </div>
+        </section>
+
+        <!-- =============================================================== -->
+        <!-- TAB 2: SALES & INVOICES (Reprint, A4, Void, Returns)            -->
+        <!-- =============================================================== -->
+        <section id="tab-sales" class="tab-pane">
+          <div class="view-header-bar">
+            <div>
+              <h2>Store Sales & Transaction Register</h2>
+              <p>Audit trail of all retail bills, payment tenders, returns, and invoice reprinting</p>
+            </div>
+            <div class="action-buttons-group">
+              <button id="refresh-orders-btn" class="btn-secondary">
+                <i class="fa-solid fa-rotate"></i> Refresh
+              </button>
+              <button id="open-returns-modal-btn" class="btn-danger">
+                <i class="fa-solid fa-arrow-rotate-left"></i> Process Return / Refund
+              </button>
+            </div>
+          </div>
+
+          <!-- Sales Filter Bar -->
+          <div class="filter-controls-row card">
+            <div class="search-field">
+              <i class="fa-solid fa-magnifying-glass"></i>
+              <input type="text" id="sales-search-filter" placeholder="Search by Bill No, Customer Name or Phone...">
+            </div>
+            <div class="select-field">
+              <label>Payment Method:</label>
+              <select id="sales-payment-filter">
+                <option value="ALL">All Payment Types</option>
+                <option value="CASH">Cash</option>
+                <option value="UPI_QR">UPI QR</option>
+                <option value="CREDIT_DEBIT_CARD">Card</option>
+              </select>
+            </div>
+            <div class="select-field">
+              <label>Status:</label>
+              <select id="sales-status-filter">
+                <option value="ALL">All Statuses</option>
+                <option value="COMPLETED">Completed</option>
+                <option value="CANCELLED">Voided / Cancelled</option>
+                <option value="REFUNDED">Refunded</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- Sales Table -->
+          <div class="card mt-15">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Invoice / Bill No</th>
+                  <th>Date & Time</th>
+                  <th>Customer</th>
+                  <th>Cashier</th>
+                  <th class="text-center">Items</th>
+                  <th class="text-center">Payment</th>
+                  <th class="text-right">Grand Total</th>
+                  <th class="text-center">Status</th>
+                  <th class="text-center">Actions</th>
+                </tr>
+              </thead>
+              <tbody id="sales-orders-tbody">
+                <!-- Rendered dynamically -->
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- =============================================================== -->
+        <!-- TAB 3: REGISTER SHIFTS & Z-REPORT (Drawer Balancing)            -->
+        <!-- =============================================================== -->
+        <section id="tab-shifts" class="tab-pane">
+          <div class="view-header-bar">
+            <div>
+              <h2>Cash Register Shifts & Day-End Z-Report</h2>
+              <p>POS cash drawer reconciliation, shift balancing, and safe drop audit</p>
+            </div>
+            <div class="action-buttons-group">
+              <button id="safe-drop-btn" class="btn-secondary">
+                <i class="fa-solid fa-money-bill-transfer"></i> Safe Cash Drop
+              </button>
+              <button id="close-shift-btn" class="btn-danger">
+                <i class="fa-solid fa-lock"></i> Close Shift & Z-Report
+              </button>
+            </div>
+          </div>
+
+          <!-- Active Shift Live Summary Card -->
+          <div class="active-shift-summary card mt-15">
+            <div class="shift-card-header">
+              <div class="shift-title">
+                <i class="fa-solid fa-cash-register"></i>
+                <div>
+                  <h3 id="shift-disp-id">Shift In Progress (Morning)</h3>
+                  <small id="shift-start-time">Started today</small>
+                </div>
+              </div>
+              <span class="status-pill in-progress">ACTIVE SHIFT</span>
+            </div>
+
+            <div class="shift-metrics-grid">
+              <div class="shift-stat-box">
+                <span class="label">Opening Float</span>
+                <h3 id="shift-opening-float">₹2,000.00</h3>
+                <small>Drawer initial cash</small>
+              </div>
+              <div class="shift-stat-box">
+                <span class="label">Cash Sales</span>
+                <h3 id="shift-cash-sales">₹0.00</h3>
+                <small>Tendered in cash</small>
+              </div>
+              <div class="shift-stat-box">
+                <span class="label">UPI & Card Sales</span>
+                <h3 id="shift-digital-sales">₹0.00</h3>
+                <small>Digital settlements</small>
+              </div>
+              <div class="shift-stat-box">
+                <span class="label">Safe Drops</span>
+                <h3 id="shift-cash-drops" style="color: #f59e0b;">₹0.00</h3>
+                <small>Transferred to safe</small>
+              </div>
+              <div class="shift-stat-box highlight">
+                <span class="label">Expected Drawer Cash</span>
+                <h3 id="shift-expected-cash" style="color: #2563eb;">₹2,000.00</h3>
+                <small>Opening + Cash - Drops</small>
+              </div>
+            </div>
+          </div>
+
+          <!-- Shift Audit History Table -->
+          <div class="card mt-20">
+            <h3><i class="fa-solid fa-clock-rotate-left"></i> Shift Closure History & Variances</h3>
+            <table class="data-table mt-10">
+              <thead>
+                <tr>
+                  <th>Shift ID</th>
+                  <th>Cashier</th>
+                  <th>Opened</th>
+                  <th>Closed</th>
+                  <th class="text-right">Opening Float</th>
+                  <th class="text-right">Total Sales</th>
+                  <th class="text-right">Expected Cash</th>
+                  <th class="text-right">Counted Cash</th>
+                  <th class="text-right">Variance</th>
+                  <th class="text-center">Status</th>
+                </tr>
+              </thead>
+              <tbody id="shifts-history-tbody">
+                <!-- Rendered dynamically -->
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- =============================================================== -->
+        <!-- TAB 4: STORE BI & P&L DASHBOARD                                 -->
+        <!-- =============================================================== -->
+        <section id="tab-dashboard" class="tab-pane">
+          <div class="view-header-bar">
+            <div>
+              <h2>Store Executive Dashboard & Business Intelligence</h2>
+              <p>Live gross revenue, net P&L, best-sellers, slow-moving stock, customer retention, seasonal demand, and restock priorities</p>
+            </div>
+            <div class="period-toggle-pills">
+              <button class="period-pill active" data-period="today">Today</button>
+              <button class="period-pill" data-period="weekly">This Week</button>
+              <button class="period-pill" data-period="monthly">This Month</button>
+              <button class="period-pill" data-period="yearly">This Year</button>
+            </div>
+          </div>
+
+          <!-- BI Subnavigation Bar -->
+          <div class="bi-subnav-bar">
+            <button class="bi-subnav-btn active" data-bi-target="bi-view-pl">
+              <i class="fa-solid fa-chart-pie"></i> Executive P&L
+            </button>
+            <button class="bi-subnav-btn" data-bi-target="bi-view-bestsellers">
+              <i class="fa-solid fa-trophy"></i> Best-Selling Products
+            </button>
+            <button class="bi-subnav-btn" data-bi-target="bi-view-slowmoving">
+              <i class="fa-solid fa-hourglass-half"></i> Slow-Moving & Dead Stock
+            </button>
+            <button class="bi-subnav-btn" data-bi-target="bi-view-retention">
+              <i class="fa-solid fa-users"></i> Customer Retention & Churn
+            </button>
+            <button class="bi-subnav-btn" data-bi-target="bi-view-seasonal">
+              <i class="fa-solid fa-calendar-week"></i> Seasonal & Peak Demand
+            </button>
+            <button class="bi-subnav-btn" data-bi-target="bi-view-restock">
+              <i class="fa-solid fa-truck-ramp-box"></i> Restock Priority Queue
+            </button>
+          </div>
+
+          <!-- BI SUBPANE 1: EXECUTIVE P&L -->
+          <div id="bi-view-pl" class="bi-subpane">
+            <!-- 4 Core Financial KPI Cards -->
+            <div class="metric-cards-row">
+              <div class="kpi-card revenue">
+                <div class="kpi-icon"><i class="fa-solid fa-indian-rupee-sign"></i></div>
+                <div class="kpi-details">
+                  <span class="kpi-title">Gross Revenue</span>
+                  <h2 id="dash-revenue">₹0.00</h2>
+                  <small id="dash-orders-count">0 Completed Transactions</small>
+                </div>
+              </div>
+
+              <div class="kpi-card cogs">
+                <div class="kpi-icon"><i class="fa-solid fa-boxes-packing"></i></div>
+                <div class="kpi-details">
+                  <span class="kpi-title">Cost of Goods Sold (COGS)</span>
+                  <h2 id="dash-cogs">₹0.00</h2>
+                  <small>Wholesale Procurement Cost</small>
+                </div>
+              </div>
+
+              <div class="kpi-card expenses">
+                <div class="kpi-icon"><i class="fa-solid fa-receipt"></i></div>
+                <div class="kpi-details">
+                  <span class="kpi-title">Operating Expenses</span>
+                  <h2 id="dash-expenses">₹0.00</h2>
+                  <small>Rent, Power, Salaries, Maintenance</small>
+                </div>
+              </div>
+
+              <div class="kpi-card profit">
+                <div class="kpi-icon"><i class="fa-solid fa-sack-dollar"></i></div>
+                <div class="kpi-details">
+                  <span class="kpi-title">Net Store Profit</span>
+                  <h2 id="dash-net-profit">₹0.00</h2>
+                  <small id="dash-profit-margin">0.0% Net Profit Margin</small>
+                </div>
+              </div>
+            </div>
+
+            <!-- Charts Row -->
+            <div class="dashboard-charts-grid">
+              <div class="chart-card card">
+                <div class="card-header-clean">
+                  <h3><i class="fa-solid fa-chart-area"></i> Revenue & Footfall Trend</h3>
+                </div>
+                <div class="chart-box">
+                  <canvas id="salesTrendChart"></canvas>
+                </div>
+              </div>
+
+              <div class="chart-card card">
+                <div class="card-header-clean">
+                  <h3><i class="fa-solid fa-pie-chart"></i> Revenue Share by Category</h3>
+                </div>
+                <div class="chart-box">
+                  <canvas id="categoryChart"></canvas>
+                </div>
+              </div>
+            </div>
+
+            <!-- Bottom Tables: Fast Movers & Priority Reorders -->
+            <div class="dashboard-tables-grid">
+              <div class="table-card card">
+                <div class="card-header-clean">
+                  <h3><i class="fa-solid fa-fire text-orange"></i> Top Fast-Moving Supermarket Items</h3>
+                </div>
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th>Product Name</th>
+                      <th>Category</th>
+                      <th class="text-center">Units Sold</th>
+                      <th class="text-right">Revenue</th>
+                    </tr>
+                  </thead>
+                  <tbody id="top-products-tbody"></tbody>
+                </table>
+              </div>
+
+              <div class="table-card card">
+                <div class="card-header-clean">
+                  <h3><i class="fa-solid fa-triangle-exclamation text-red"></i> Depleted Stock Alerts (Min-Heap Priority)</h3>
+                </div>
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th>Product SKU</th>
+                      <th>Category</th>
+                      <th class="text-center">Stock</th>
+                      <th class="text-center">Reorder Threshold</th>
+                      <th class="text-center">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody id="low-stock-tbody"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <!-- BI SUBPANE 2: BEST-SELLING PRODUCTS -->
+          <div id="bi-view-bestsellers" class="bi-subpane hidden">
+            <div class="card">
+              <div class="card-header-clean">
+                <h3><i class="fa-solid fa-trophy text-orange"></i> Best-Selling Supermarket Products (Volume, Revenue & Profit Contribution)</h3>
+                <small class="text-muted">Calculated from completed customer order records</small>
+              </div>
+              <table class="data-table mt-10">
+                <thead>
+                  <tr>
+                    <th class="text-center" style="width: 50px;">Rank</th>
+                    <th>Product Description</th>
+                    <th>Barcode / SKU</th>
+                    <th>Category</th>
+                    <th class="text-center">30-Day Units</th>
+                    <th class="text-center">Total Sold</th>
+                    <th class="text-right">Gross Revenue</th>
+                    <th class="text-right">Gross Profit</th>
+                    <th class="text-center">Margin %</th>
+                    <th class="text-center">Current Stock</th>
+                  </tr>
+                </thead>
+                <tbody id="bi-bestsellers-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- BI SUBPANE 3: SLOW-MOVING & DEAD STOCK -->
+          <div id="bi-view-slowmoving" class="bi-subpane hidden">
+            <div class="bi-alert-banner" id="bi-slowmoving-alert">
+              <div class="bi-alert-content">
+                <h4><i class="fa-solid fa-triangle-exclamation"></i> Idle Capital Locked in Slow-Moving / Dead Stock</h4>
+                <p>Identifies products with stagnant turnover (sales ≤ 2 in past 30 days) and provides actionable retail clearance strategies.</p>
+              </div>
+              <div class="bi-capital-tag">
+                <span id="bi-total-locked-capital">₹0.00</span>
+                <small>Total Working Capital Tied Up</small>
+              </div>
+            </div>
+
+            <div class="card">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Product Name</th>
+                    <th>Category</th>
+                    <th class="text-center">Shelf Stock</th>
+                    <th class="text-center">30-Day Sales</th>
+                    <th class="text-right">Cost Price</th>
+                    <th class="text-right">Selling Price</th>
+                    <th class="text-right">Capital Locked</th>
+                    <th class="text-center">Risk Level</th>
+                    <th>Recommended Retail Action</th>
+                  </tr>
+                </thead>
+                <tbody id="bi-slowmoving-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- BI SUBPANE 4: CUSTOMER RETENTION & CHURN -->
+          <div id="bi-view-retention" class="bi-subpane hidden">
+            <div class="retention-kpi-grid">
+              <div class="retention-card">
+                <span class="label">Repeat Customer Rate</span>
+                <h2 class="highlight" id="bi-retention-rate">0.0%</h2>
+                <small>Customers with ≥ 2 Store Visits</small>
+              </div>
+              <div class="retention-card">
+                <span class="label">Returning Shoppers</span>
+                <h2 id="bi-returning-count">0</h2>
+                <small>High Lifetime Loyalty</small>
+              </div>
+              <div class="retention-card">
+                <span class="label">First-Time Shoppers</span>
+                <h2 id="bi-singlevisit-count">0</h2>
+                <small>Acquisition Pipeline</small>
+              </div>
+              <div class="retention-card">
+                <span class="label">Average Customer LTV</span>
+                <h2 id="bi-avg-ltv">₹0.00</h2>
+                <small>Lifetime Revenue Per Customer</small>
+              </div>
+            </div>
+
+            <div class="dashboard-charts-grid mt-15">
+              <div class="card">
+                <h3><i class="fa-solid fa-user-clock"></i> Churn Risk & Recency Monitoring</h3>
+                <div class="churn-monitor-list mt-15">
+                  <div class="churn-stat-row">
+                    <div class="flex-between">
+                      <span><strong>Active Shoppers</strong> (Visited within last 14 days)</span>
+                      <strong id="bi-churn-active-count">0 Customers</strong>
+                    </div>
+                    <div class="progress-track"><div id="bi-churn-active-bar" class="progress-fill active" style="width: 0%;"></div></div>
+                  </div>
+                  <div class="churn-stat-row mt-15">
+                    <div class="flex-between">
+                      <span><strong>At Risk / Cooling Down</strong> (Visited 15 to 45 days ago)</span>
+                      <strong id="bi-churn-risk-count">0 Customers</strong>
+                    </div>
+                    <div class="progress-track"><div id="bi-churn-risk-bar" class="progress-fill at-risk" style="width: 0%;"></div></div>
+                  </div>
+                  <div class="churn-stat-row mt-15">
+                    <div class="flex-between">
+                      <span><strong>Dormant / Churned</strong> (No visit in > 45 days)</span>
+                      <strong id="bi-churn-dormant-count">0 Customers</strong>
+                    </div>
+                    <div class="progress-track"><div id="bi-churn-dormant-bar" class="progress-fill dormant" style="width: 0%;"></div></div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="card">
+                <h3><i class="fa-solid fa-crown"></i> Loyalty Tier Distribution & Spend</h3>
+                <table class="data-table mt-10">
+                  <thead>
+                    <tr>
+                      <th>Tier</th>
+                      <th class="text-center">Members</th>
+                      <th class="text-right">Total Spend</th>
+                    </tr>
+                  </thead>
+                  <tbody id="bi-tiers-tbody"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <!-- BI SUBPANE 5: SEASONAL & PEAK DEMAND -->
+          <div id="bi-view-seasonal" class="bi-subpane hidden">
+            <div class="dashboard-charts-grid">
+              <div class="chart-card card">
+                <div class="card-header-clean">
+                  <h3><i class="fa-solid fa-calendar-day text-blue"></i> Day-of-Week Sales Volume & Footfall</h3>
+                  <small id="bi-busiest-day-tag" class="text-muted">Busiest Day: Saturday</small>
+                </div>
+                <div class="chart-box">
+                  <canvas id="dayOfWeekChart"></canvas>
+                </div>
+              </div>
+
+              <div class="chart-card card">
+                <div class="card-header-clean">
+                  <h3><i class="fa-solid fa-clock text-orange"></i> Hourly Peak Shopping Hours</h3>
+                  <small id="bi-peak-hour-tag" class="text-muted">Peak Rush: 18:00 - 19:00</small>
+                </div>
+                <div class="chart-box">
+                  <canvas id="hourlyPeakChart"></canvas>
+                </div>
+              </div>
+            </div>
+
+            <div class="card mt-15">
+              <h3><i class="fa-solid fa-layer-group"></i> Department & Category Demand Dynamics</h3>
+              <table class="data-table mt-10">
+                <thead>
+                  <tr>
+                    <th>Category</th>
+                    <th class="text-center">Units Sold</th>
+                    <th class="text-right">Gross Revenue</th>
+                    <th class="text-right">Revenue Share %</th>
+                  </tr>
+                </thead>
+                <tbody id="bi-seasonal-categories-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- BI SUBPANE 6: RESTOCK PRIORITY QUEUE -->
+          <div id="bi-view-restock" class="bi-subpane hidden">
+            <div class="bi-alert-banner" style="background: rgba(37, 99, 235, 0.08); border-color: rgba(37, 99, 235, 0.3);">
+              <div class="bi-alert-content">
+                <h4 style="color: var(--primary-accent);"><i class="fa-solid fa-truck-ramp-box"></i> Automated Replenishment & Restock Queue</h4>
+                <p>Prioritized items evaluated by stock depletion ratio against minimum shelf reorder thresholds.</p>
+              </div>
+              <div class="bi-capital-tag" style="color: var(--primary-accent);">
+                <span id="bi-total-restock-budget">₹0.00</span>
+                <small>Estimated Restock Procurement Cost</small>
+              </div>
+            </div>
+
+            <div class="card">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Product Description</th>
+                    <th>Barcode / SKU</th>
+                    <th>Category</th>
+                    <th class="text-center">Current Stock</th>
+                    <th class="text-center">Reorder Level</th>
+                    <th class="text-center">Depletion Ratio</th>
+                    <th class="text-center">Restock Urgency</th>
+                    <th class="text-center">Suggested Order Units</th>
+                    <th class="text-right">Est. Cost</th>
+                    <th>Supplier / Distributor</th>
+                  </tr>
+                </thead>
+                <tbody id="bi-restock-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <!-- =============================================================== -->
+        <!-- TAB 5: INVENTORY & STOCK MANAGEMENT                             -->
+        <!-- =============================================================== -->
+        <section id="tab-inventory" class="tab-pane">
+          <div class="view-header-bar">
+            <div>
+              <h2>Catalog, Inventory Valuation & Stock Management</h2>
+              <p>Real-time SKU stock levels, barcode assignments, procurement costs, adjustments and valuation</p>
+            </div>
+            <div class="action-buttons-group">
+              <button id="export-catalog-csv-btn" class="btn-secondary">
+                <i class="fa-solid fa-file-arrow-down"></i> Export CSV
+              </button>
+              <button id="import-catalog-modal-btn" class="btn-secondary">
+                <i class="fa-solid fa-file-arrow-up"></i> Bulk Import CSV
+              </button>
+              <button id="add-product-modal-btn" class="btn-primary">
+                <i class="fa-solid fa-plus-circle"></i> Add Product SKU
+              </button>
+            </div>
+          </div>
+
+          <!-- Valuation Metric Cards -->
+          <div class="inventory-valuation-grid mt-15">
+            <div class="val-card">
+              <span class="label">Total Distinct SKUs</span>
+              <h3 id="val-skus-count">0</h3>
+            </div>
+            <div class="val-card">
+              <span class="label">Total Physical Units</span>
+              <h3 id="val-units-count">0</h3>
+            </div>
+            <div class="val-card">
+              <span class="label">Procurement Cost Valuation</span>
+              <h3 id="val-cost-total">₹0.00</h3>
+            </div>
+            <div class="val-card highlight">
+              <span class="label">Retail Selling Valuation</span>
+              <h3 id="val-retail-total">₹0.00</h3>
+            </div>
+            <div class="val-card">
+              <span class="label">Potential Gross Margin</span>
+              <h3 id="val-gross-margin" style="color: #059669;">₹0.00</h3>
+            </div>
+          </div>
+
+          <!-- Inventory Filter Bar -->
+          <div class="filter-controls-row card mt-15">
+            <div class="search-field">
+              <i class="fa-solid fa-magnifying-glass"></i>
+              <input type="text" id="inventory-search-filter" placeholder="Search catalog by barcode, name or brand...">
+            </div>
+            <div class="select-field">
+              <label>Stock Filter:</label>
+              <select id="inventory-stock-filter">
+                <option value="ALL">All Items</option>
+                <option value="LOW">Low Stock (At or below reorder)</option>
+                <option value="OUT">Out of Stock</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- Catalog Table -->
+          <div class="card mt-15">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Barcode</th>
+                  <th>Product Name</th>
+                  <th>Category</th>
+                  <th class="text-right">Cost (COGS)</th>
+                  <th class="text-right">Store Price</th>
+                  <th class="text-right">MRP</th>
+                  <th class="text-right">Margin</th>
+                  <th class="text-center">Stock Level</th>
+                  <th class="text-center">Status</th>
+                  <th class="text-center">Actions</th>
+                </tr>
+              </thead>
+              <tbody id="inventory-tbody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- =============================================================== -->
+        <!-- TAB 6: CUSTOMER FOOTFALL & CRM                                  -->
+        <!-- =============================================================== -->
+        <section id="tab-customers" class="tab-pane">
+          <div class="view-header-bar">
+            <div>
+              <h2>Customer Footfall & Loyalty CRM</h2>
+              <p>Track how many times each customer visited, lifetime spend, purchase frequency and loyalty tier</p>
+            </div>
+            <div class="search-field wide">
+              <i class="fa-solid fa-magnifying-glass"></i>
+              <input type="text" id="cust-table-filter" placeholder="Search customer by mobile number or name...">
+            </div>
+          </div>
+
+          <!-- Customer Footfall Table -->
+          <div class="card mt-15">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Membership ID</th>
+                  <th>Customer Name</th>
+                  <th>Mobile Phone</th>
+                  <th class="text-center">Times Visited</th>
+                  <th class="text-center">Loyalty Tier</th>
+                  <th class="text-center">Reward Points</th>
+                  <th class="text-right">Lifetime Spend</th>
+                  <th class="text-right">Average Basket</th>
+                  <th>Last Visit</th>
+                  <th class="text-center">Actions</th>
+                </tr>
+              </thead>
+              <tbody id="customers-tbody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- =============================================================== -->
+        <!-- TAB 7: EXPENSES MANAGEMENT                                      -->
+        <!-- =============================================================== -->
+        <section id="tab-expenses" class="tab-pane">
+          <div class="view-header-bar">
+            <div>
+              <h2>Store Operating Expenses Ledger</h2>
+              <p>Track store expenditures across Weekly, Monthly, and Yearly fiscal cycles</p>
+            </div>
+            <div class="action-buttons-group">
+              <button id="export-expenses-csv-btn" class="btn-secondary">
+                <i class="fa-solid fa-file-arrow-down"></i> Export Expenses CSV
+              </button>
+              <button id="add-expense-modal-btn" class="btn-primary">
+                <i class="fa-solid fa-plus-circle"></i> Record Store Expense
+              </button>
+            </div>
+          </div>
+
+          <!-- 3 Period Summary Cards -->
+          <div class="expense-summary-grid mt-15">
+            <div class="exp-summary-card weekly">
+              <h4>THIS WEEK'S OPERATING EXPENSES</h4>
+              <h2 id="exp-total-weekly">₹0.00</h2>
+              <p>Wages, carry bags, transport & daily maintenance</p>
+            </div>
+            <div class="exp-summary-card monthly">
+              <h4>THIS MONTH'S OPERATING EXPENSES</h4>
+              <h2 id="exp-total-monthly">₹0.00</h2>
+              <p>Store rent, electricity, full payroll & restock</p>
+            </div>
+            <div class="exp-summary-card yearly">
+              <h4>THIS YEAR'S OPERATING EXPENSES</h4>
+              <h2 id="exp-total-yearly">₹0.00</h2>
+              <p>Annual licensing, equipment amortisation, insurance</p>
+            </div>
+          </div>
+
+          <!-- Expense Ledger Table -->
+          <div class="card mt-20">
+            <h3><i class="fa-solid fa-list-check"></i> Supermarket Expenditure Ledger</h3>
+            <table class="data-table mt-10">
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Category</th>
+                  <th>Description</th>
+                  <th>Payment Mode</th>
+                  <th>Vendor</th>
+                  <th class="text-right">Amount (₹)</th>
+                  <th class="text-center">Action</th>
+                </tr>
+              </thead>
+              <tbody id="expenses-tbody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- =============================================================== -->
+        <!-- TAB 8: DATA EXPORTS & REPORTS                                   -->
+        <!-- =============================================================== -->
+        <section id="tab-reports" class="tab-pane">
+          <div class="view-header-bar">
+            <div>
+              <h2>Store Audit & Business Data Exports</h2>
+              <p>Download complete CSV reports for transactions, store expenses, and catalog inventory</p>
+            </div>
+          </div>
+
+          <div class="reports-grid mt-20">
+            <div class="report-box card">
+              <div class="report-icon"><i class="fa-solid fa-file-invoice-dollar"></i></div>
+              <h3>Sales Transactions Report</h3>
+              <p>Full breakdown of all customer orders, item counts, tax breakups, tenders, and savings</p>
+              <a href="/api/reports/sales-csv" download class="btn-primary">
+                <i class="fa-solid fa-download"></i> Download Sales CSV
+              </a>
+            </div>
+
+            <div class="report-box card">
+              <div class="report-icon"><i class="fa-solid fa-receipt"></i></div>
+              <h3>Store Operating Expenses Report</h3>
+              <p>Comprehensive ledger of rent, electricity, wages, bags, logistics, and maintenance</p>
+              <a href="/api/reports/expenses-csv" download class="btn-primary">
+                <i class="fa-solid fa-download"></i> Download Expenses CSV
+              </a>
+            </div>
+
+            <div class="report-box card">
+              <div class="report-icon"><i class="fa-solid fa-boxes-packing"></i></div>
+              <h3>Active Catalog & Inventory Report</h3>
+              <p>Export all SKU barcodes, cost prices, store retail rates, stock levels, and tax rates</p>
+              <a href="/api/inventory/export-csv" download class="btn-primary">
+                <i class="fa-solid fa-download"></i> Download Catalog CSV
+              </a>
+            </div>
+          </div>
+        </section>
+
+        <!-- =============================================================== -->
+        <!-- TAB 9: MULTI-BRANCH STORE ARCHITECTURE & INTER-BRANCH LOGISTICS -->
+        <!-- =============================================================== -->
+        <section id="tab-branches" class="tab-pane">
+          <div class="view-header-row">
+            <div>
+              <h2>Multi-Branch Store Network & Inventory Allocations</h2>
+              <p>Single-store ready today with seamless enterprise expansion to multiple physical branches</p>
+            </div>
+            <div class="header-action-group">
+              <button id="btn-open-transfer-modal" class="btn-secondary">
+                <i class="fa-solid fa-right-left"></i> Inter-Branch Stock Transfer
+              </button>
+              <button id="btn-open-register-branch" class="btn-primary">
+                <i class="fa-solid fa-plus"></i> Register New Branch
+              </button>
+            </div>
+          </div>
+
+          <!-- Multi-Store Network Executive KPIs -->
+          <div class="dashboard-kpi-grid mt-20">
+            <div class="kpi-card card">
+              <div class="kpi-icon-box bg-blue"><i class="fa-solid fa-store"></i></div>
+              <div class="kpi-details">
+                <span class="kpi-label">Active Store Branches</span>
+                <strong id="kpi-branch-count" class="kpi-value">3</strong>
+                <span class="kpi-subtext text-green">100% Operational Status</span>
+              </div>
+            </div>
+
+            <div class="kpi-card card">
+              <div class="kpi-icon-box bg-green"><i class="fa-solid fa-indian-rupee-sign"></i></div>
+              <div class="kpi-details">
+                <span class="kpi-label">Consolidated Chain Revenue</span>
+                <strong id="kpi-chain-revenue" class="kpi-value">₹0.00</strong>
+                <span class="kpi-subtext">Across All Branches</span>
+              </div>
+            </div>
+
+            <div class="kpi-card card">
+              <div class="kpi-icon-box bg-purple"><i class="fa-solid fa-receipt"></i></div>
+              <div class="kpi-details">
+                <span class="kpi-label">Consolidated Orders</span>
+                <strong id="kpi-chain-orders" class="kpi-value">0</strong>
+                <span class="kpi-subtext">Chain-wide Transactions</span>
+              </div>
+            </div>
+
+            <div class="kpi-card card">
+              <div class="kpi-icon-box bg-orange"><i class="fa-solid fa-truck-ramp-box"></i></div>
+              <div class="kpi-details">
+                <span class="kpi-label">Inter-Branch Transfers</span>
+                <strong id="kpi-chain-transfers" class="kpi-value">Active</strong>
+                <span class="kpi-subtext">Atomic Inventory Balance</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Interactive Store Branch Cards Grid -->
+          <div class="section-subheading mt-20">
+            <h3>Physical Store Locations</h3>
+            <p>Click any store card to switch your active POS terminal, shelf stock, and registers</p>
+          </div>
+          <div id="branch-cards-grid" class="branch-cards-grid">
+            <!-- Dynamically populated store cards -->
+          </div>
+
+          <!-- Consolidated Multi-Branch Performance Table -->
+          <div class="card mt-20">
+            <div class="table-header-bar">
+              <div class="table-title">
+                <h3>Store Branches Comparative Performance</h3>
+                <p>Derived dynamically from live SQLite database transactions and order allocations</p>
+              </div>
+            </div>
+            <table class="data-table mt-15">
+              <thead>
+                <tr>
+                  <th>Store Code</th>
+                  <th>Branch Name</th>
+                  <th>Type</th>
+                  <th>Location & City</th>
+                  <th>Store Manager</th>
+                  <th class="text-right">Completed Bills</th>
+                  <th class="text-right">Total Net Sales</th>
+                  <th>Status</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody id="branch-summary-tbody">
+                <!-- Dynamically populated comparison rows -->
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+      </main>
+    </div>
+  </div>
+
+  <!-- =================================================================== -->
+  <!-- MODAL 1: 80mm THERMAL RECEIPT DISPLAY                               -->
+  <!-- =================================================================== -->
+  <div id="receipt-modal" class="modal-overlay hidden">
+    <div class="receipt-modal-card">
+      <div class="modal-header">
+        <h3><i class="fa-solid fa-receipt"></i> 80mm Supermarket Thermal Receipt</h3>
+        <button id="close-receipt-btn" class="close-modal-btn">&times;</button>
+      </div>
+      <div class="receipt-paper-container">
+        <pre id="receipt-content" class="thermal-receipt-text"></pre>
+      </div>
+      <div class="modal-actions">
+        <button id="print-receipt-btn" class="btn-primary">
+          <i class="fa-solid fa-print"></i> Print Receipt [Ctrl+P]
+        </button>
+        <button id="dismiss-receipt-btn" class="btn-secondary">
+          <i class="fa-solid fa-plus"></i> New Sale
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- =================================================================== -->
+  <!-- MODAL 2: A4 GST TAX INVOICE PREVIEW                                 -->
+  <!-- =================================================================== -->
+  <div id="a4-invoice-modal" class="modal-overlay hidden">
+    <div class="modal-card extra-wide">
+      <div class="modal-header">
+        <h3><i class="fa-solid fa-file-invoice"></i> A4 GST Tax Invoice View</h3>
+        <button id="close-a4-modal-btn" class="close-modal-btn">&times;</button>
+      </div>
+      <div class="a4-container-frame" id="a4-invoice-content">
+        <!-- Rendered invoice HTML -->
+      </div>
+      <div class="modal-actions">
+        <button id="print-a4-btn" class="btn-primary">
+          <i class="fa-solid fa-print"></i> Print Formal A4 Invoice
+        </button>
+        <button id="dismiss-a4-btn" class="btn-secondary">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- =================================================================== -->
+  <!-- MODAL 3: PROCESS RETURN & REFUND                                    -->
+  <!-- =================================================================== -->
+  <div id="return-modal" class="modal-overlay hidden">
+    <div class="modal-card wide">
+      <div class="modal-header">
+        <h3><i class="fa-solid fa-arrow-rotate-left text-red"></i> Process Customer Return / Refund</h3>
+        <button id="close-return-modal-btn" class="close-modal-btn">&times;</button>
+      </div>
+      <div class="modal-body-padded">
+        <div class="form-row">
+          <label>Original Invoice / Bill Number:</label>
+          <div class="input-with-button">
+            <input type="text" id="return-bill-input" placeholder="e.g. SB-20261031-1001">
+            <button id="fetch-return-bill-btn" class="btn-secondary">Fetch Bill</button>
+          </div>
+        </div>
+
+        <div id="return-bill-details" class="return-items-box hidden">
+          <h4>Select Item(s) to Return:</h4>
+          <table class="data-table mt-10">
+            <thead>
+              <tr>
+                <th>Select</th>
+                <th>Product Description</th>
+                <th>Sold Qty</th>
+                <th>Return Qty</th>
+                <th class="text-right">Unit Price</th>
+                <th class="text-right">Refund Total</th>
+              </tr>
+            </thead>
+            <tbody id="return-items-tbody"></tbody>
+          </table>
+
+          <div class="form-row mt-15">
+            <label>Return / Exchange Reason:</label>
+            <select id="return-reason-select">
+              <option value="Customer Return / Exchange">Customer Exchange</option>
+              <option value="Defective / Damaged Item">Defective / Damaged Item</option>
+              <option value="Wrong Item Purchased">Wrong Item Purchased</option>
+              <option value="Customer Dissatisfied">Customer Dissatisfied</option>
+            </select>
+          </div>
+
+          <div class="form-row">
+            <label>Store Manager Authorization PIN (Required for Refunds):</label>
+            <input type="password" id="return-manager-pin" placeholder="Enter Store Manager PIN (e.g. 2222)" maxlength="8">
+          </div>
+
+          <div class="return-refund-total-bar">
+            <span>Total Refund Amount:</span>
+            <strong id="return-total-refund-disp">₹0.00</strong>
+          </div>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button id="confirm-return-btn" class="btn-danger" disabled>
+          <i class="fa-solid fa-check"></i> Authorize & Process Refund
+        </button>
+        <button id="cancel-return-btn" class="btn-secondary">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- =================================================================== -->
+  <!-- MODAL 4: VOID BILL CONFIRMATION                                     -->
+  <!-- =================================================================== -->
+  <div id="void-modal" class="modal-overlay hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3><i class="fa-solid fa-ban text-red"></i> Void / Cancel Transaction</h3>
+        <button id="close-void-modal-btn" class="close-modal-btn">&times;</button>
+      </div>
+      <div class="modal-body-padded">
+        <p>You are about to cancel bill <strong id="void-bill-display">SB-XXXX</strong>. This will restore all line item quantities to inventory stock.</p>
+        <div class="form-row mt-15">
+          <label>Cancellation Reason:</label>
+          <input type="text" id="void-reason-input" placeholder="e.g. Cashier error, duplicate scan">
+        </div>
+        <div class="form-row">
+          <label>Manager Authorization PIN:</label>
+          <input type="password" id="void-manager-pin" placeholder="Enter Manager PIN (e.g. 2222)">
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button id="confirm-void-btn" class="btn-danger">Confirm Void Bill</button>
+        <button id="cancel-void-btn" class="btn-secondary">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- =================================================================== -->
+  <!-- MODAL 5: SAFE CASH DROP                                             -->
+  <!-- =================================================================== -->
+  <div id="cash-drop-modal" class="modal-overlay hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3><i class="fa-solid fa-money-bill-transfer"></i> Safe Cash Drop</h3>
+        <button id="close-drop-modal-btn" class="close-modal-btn">&times;</button>
+      </div>
+      <div class="modal-body-padded">
+        <p>Transfer excess cash from POS drawer into the main store safe.</p>
+        <div class="form-row mt-15">
+          <label>Drop Amount (₹):</label>
+          <input type="number" id="drop-amount-input" step="100" min="100" placeholder="e.g. 5000">
+        </div>
+        <div class="form-row">
+          <label>Notes / Reason:</label>
+          <input type="text" id="drop-reason-input" value="Midday Safe Drop">
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button id="confirm-drop-btn" class="btn-primary">Confirm Safe Drop</button>
+        <button id="cancel-drop-btn" class="btn-secondary">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- =================================================================== -->
+  <!-- MODAL 6: CLOSE SHIFT & Z-REPORT                                     -->
+  <!-- =================================================================== -->
+  <div id="close-shift-modal" class="modal-overlay hidden">
+    <div class="modal-card wide">
+      <div class="modal-header">
+        <h3><i class="fa-solid fa-file-invoice-dollar"></i> End of Day Shift Closure & Z-Report</h3>
+        <button id="close-shift-modal-btn" class="close-modal-btn">&times;</button>
+      </div>
+      <div class="modal-body-padded">
+        <div class="shift-reconcile-info">
+          <p>Please count physical cash currently in the POS drawer and enter below to compute drawer variance.</p>
+        </div>
+        <div class="form-row mt-15">
+          <label>Physical Counted Cash in Drawer (₹):</label>
+          <input type="number" id="closing-counted-cash-input" step="1" placeholder="Enter physical cash count">
+        </div>
+        <div class="form-row">
+          <label>Closing Shift Notes:</label>
+          <input type="text" id="closing-shift-notes" value="End of Day Register Close">
+        </div>
+
+        <div id="z-report-result" class="z-report-box hidden">
+          <h4>DAY-END Z-REPORT SUMMARY</h4>
+          <pre id="z-report-text"></pre>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button id="confirm-close-shift-btn" class="btn-danger">Generate Z-Report & Close Shift</button>
+        <button id="cancel-close-shift-btn" class="btn-secondary">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- =================================================================== -->
+  <!-- MODAL 7: STOCK ADJUSTMENT                                           -->
+  <!-- =================================================================== -->
+  <div id="stock-adjust-modal" class="modal-overlay hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3><i class="fa-solid fa-sliders"></i> Adjust Product Stock Level</h3>
+        <button id="close-adjust-modal-btn" class="close-modal-btn">&times;</button>
+      </div>
+      <div class="modal-body-padded">
+        <div class="form-row">
+          <label>Product Barcode:</label>
+          <input type="text" id="adjust-barcode-input" readonly>
+        </div>
+        <div class="form-row">
+          <label>Product Name:</label>
+          <input type="text" id="adjust-name-input" readonly>
+        </div>
+        <div class="form-row">
+          <label>New Physical Shelf Quantity:</label>
+          <input type="number" id="adjust-qty-input" min="0" step="1">
+        </div>
+        <div class="form-row">
+          <label>Reason for Adjustment:</label>
+          <select id="adjust-reason-type">
+            <option value="DISCREPANCY">Inventory Discrepancy / Shelf Audit</option>
+            <option value="DAMAGE">Damaged / Expired Goods</option>
+            <option value="RESTOCK">Direct In-Store Restock</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <label>Remarks / Reference:</label>
+          <input type="text" id="adjust-notes-input" placeholder="e.g. Audit check by manager">
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button id="confirm-adjust-btn" class="btn-primary">Update Shelf Stock</button>
+        <button id="cancel-adjust-btn" class="btn-secondary">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- =================================================================== -->
+  <!-- MODAL 8: BULK CSV CATALOG IMPORT                                    -->
+  <!-- =================================================================== -->
+  <div id="import-catalog-modal" class="modal-overlay hidden">
+    <div class="modal-card wide">
+      <div class="modal-header">
+        <h3><i class="fa-solid fa-file-import"></i> Bulk Product Catalog Import (CSV)</h3>
+        <button id="close-import-modal-btn" class="close-modal-btn">&times;</button>
+      </div>
+      <div class="modal-body-padded">
+        <p>Paste CSV rows matching the schema: <code>Barcode,SKU,Name,Category,Brand,Unit,CostPrice,SellingPrice,MRP,StockQuantity,ReorderLevel,TaxRatePercent</code></p>
+        <textarea id="import-csv-textarea" class="csv-textarea" rows="8" placeholder="Paste CSV text here..."></textarea>
+      </div>
+      <div class="modal-actions">
+        <button id="confirm-import-csv-btn" class="btn-primary">Process & Upsert Catalog</button>
+        <button id="cancel-import-csv-btn" class="btn-secondary">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- =================================================================== -->
+  <!-- MODAL 9: ADD NEW PRODUCT SKU                                        -->
+  <!-- =================================================================== -->
+  <div id="product-modal" class="modal-overlay hidden">
+    <div class="modal-card wide">
+      <div class="modal-header">
+        <h3><i class="fa-solid fa-box-open"></i> Add New Product to Catalog</h3>
+        <button id="close-product-modal-btn" class="close-modal-btn">&times;</button>
+      </div>
+      <form id="product-form" class="modal-form">
+        <div class="form-grid-2">
+          <div class="form-row">
+            <label>Barcode:</label>
+            <input type="text" id="prod-barcode-input" required placeholder="e.g. 8901030999999">
+          </div>
+          <div class="form-row">
+            <label>SKU Code:</label>
+            <input type="text" id="prod-sku-input" required placeholder="e.g. SKU-AMUL-01">
+          </div>
+        </div>
+        <div class="form-row">
+          <label>Product Name:</label>
+          <input type="text" id="prod-name-input" required placeholder="e.g. Amul Gold Full Cream Milk 1L">
+        </div>
+        <div class="form-grid-3">
+          <div class="form-row">
+            <label>Category:</label>
+            <input type="text" id="prod-category-input" required placeholder="Dairy / Groceries">
+          </div>
+          <div class="form-row">
+            <label>Brand:</label>
+            <input type="text" id="prod-brand-input" required placeholder="e.g. Amul">
+          </div>
+          <div class="form-row">
+            <label>Unit:</label>
+            <input type="text" id="prod-unit-input" value="pcs" required>
+          </div>
+        </div>
+        <div class="form-grid-3">
+          <div class="form-row">
+            <label>Cost Price (COGS ₹):</label>
+            <input type="number" id="prod-cost-input" step="0.01" required placeholder="0.00">
+          </div>
+          <div class="form-row">
+            <label>Store Selling Price (₹):</label>
+            <input type="number" id="prod-price-input" step="0.01" required placeholder="0.00">
+          </div>
+          <div class="form-row">
+            <label>Printed MRP (₹):</label>
+            <input type="number" id="prod-mrp-input" step="0.01" required placeholder="0.00">
+          </div>
+        </div>
+        <div class="form-grid-3">
+          <div class="form-row">
+            <label>Opening Stock Quantity:</label>
+            <input type="number" id="prod-stock-input" required placeholder="100">
+          </div>
+          <div class="form-row">
+            <label>Reorder Threshold Level:</label>
+            <input type="number" id="prod-reorder-input" value="15" required>
+          </div>
+          <div class="form-row">
+            <label>GST Tax Rate (%):</label>
+            <input type="number" id="prod-tax-input" value="5.0" step="0.1" required>
+          </div>
+        </div>
+        <div class="form-actions">
+          <button type="submit" class="btn-primary">Save Product SKU</button>
+          <button type="button" id="cancel-product-btn" class="btn-secondary">Cancel</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- =================================================================== -->
+  <!-- MODAL 10: ADD NEW STORE EXPENSE                                     -->
+  <!-- =================================================================== -->
+  <div id="expense-modal" class="modal-overlay hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3><i class="fa-solid fa-file-invoice-dollar"></i> Record Store Operating Expense</h3>
+        <button id="close-expense-modal-btn" class="close-modal-btn">&times;</button>
+      </div>
+      <form id="expense-form" class="modal-form">
+        <div class="form-row">
+          <label>Category:</label>
+          <select id="exp-category-input" required>
+            <option value="RENT">Store Rent Lease</option>
+            <option value="ELECTRICITY_UTILITIES">Electricity & Power Utilities</option>
+            <option value="STAFF_SALARIES">Staff Salaries & Payroll</option>
+            <option value="INVENTORY_RESTOCK">Inventory Restock Wholesale</option>
+            <option value="PACKAGING_BAGS">Packaging & Carry Bags</option>
+            <option value="MAINTENANCE_REPAIRS">Maintenance & Repairs</option>
+            <option value="LOGISTICS_TRANSPORT">Logistics & Transportation</option>
+            <option value="MARKETING_PROMOTIONS">Marketing & Promotions</option>
+            <option value="MISCELLANEOUS">Miscellaneous Store Expense</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <label>Amount (₹):</label>
+          <input type="number" id="exp-amount-input" step="0.01" min="1" required placeholder="e.g. 15000.00">
+        </div>
+        <div class="form-row">
+          <label>Expense Date:</label>
+          <input type="date" id="exp-date-input" required>
+        </div>
+        <div class="form-row">
+          <label>Description:</label>
+          <input type="text" id="exp-desc-input" required placeholder="e.g. Monthly commercial power bill">
+        </div>
+        <div class="form-row">
+          <label>Payment Mode:</label>
+          <select id="exp-mode-input">
+            <option value="BANK_TRANSFER">Bank Transfer / NEFT</option>
+            <option value="UPI">UPI (GPay / PhonePe)</option>
+            <option value="CHEQUE">Cheque</option>
+            <option value="CASH">Cash</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <label>Vendor / Supplier Name:</label>
+          <input type="text" id="exp-vendor-input" placeholder="e.g. Electricity Board / DLF">
+        </div>
+        <div class="form-actions">
+          <button type="submit" class="btn-primary">Save Expense</button>
+          <button type="button" id="cancel-expense-btn" class="btn-secondary">Cancel</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- =================================================================== -->
+  <!-- MODAL 11: CUSTOMER ORDER HISTORY                                    -->
+  <!-- =================================================================== -->
+  <div id="cust-history-modal" class="modal-overlay hidden">
+    <div class="modal-card wide">
+      <div class="modal-header">
+        <h3 id="history-modal-title"><i class="fa-solid fa-clock-rotate-left"></i> Customer Order History</h3>
+        <button id="close-history-modal-btn" class="close-modal-btn">&times;</button>
+      </div>
+      <div class="history-content-container">
+        <div id="customer-history-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- =================================================================== -->
+  <!-- MODAL 12: SHELF BARCODE TAG PREVIEW                                 -->
+  <!-- =================================================================== -->
+  <div id="shelf-tag-modal" class="modal-overlay hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3><i class="fa-solid fa-barcode"></i> Shelf Price & Barcode Label</h3>
+        <button id="close-tag-modal-btn" class="close-modal-btn">&times;</button>
+      </div>
+      <div class="modal-body-padded">
+        <div class="shelf-tag-preview" id="shelf-tag-container">
+          <!-- Dynamically inserted tag -->
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button onclick="window.print()" class="btn-primary">Print Shelf Tag</button>
+        <button id="dismiss-tag-btn" class="btn-secondary">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- =================================================================== -->
+  <!-- MODAL 13: REGISTER NEW STORE BRANCH                                 -->
+  <!-- =================================================================== -->
+  <div id="modal-register-branch" class="modal-overlay hidden">
+    <div class="modal-card wide">
+      <div class="modal-header">
+        <h3><i class="fa-solid fa-store"></i> Register New Store Branch</h3>
+        <button id="close-branch-modal-btn" class="close-modal-btn">&times;</button>
+      </div>
+      <form id="branch-form" class="modal-form">
+        <div class="form-grid-2">
+          <div class="form-row">
+            <label>Branch Code (e.g. DEL-05 / BLR-04):</label>
+            <input type="text" id="branch-code-input" required placeholder="e.g. DEL-05" style="text-transform: uppercase;">
+          </div>
+          <div class="form-row">
+            <label>Branch Name:</label>
+            <input type="text" id="branch-name-input" required placeholder="e.g. Connaught Place Flagship">
+          </div>
+        </div>
+        <div class="form-row">
+          <label>Full Store Address:</label>
+          <input type="text" id="branch-address-input" required placeholder="e.g. Block B, Inner Circle, Connaught Place">
+        </div>
+        <div class="form-grid-3">
+          <div class="form-row">
+            <label>City:</label>
+            <input type="text" id="branch-city-input" required placeholder="e.g. New Delhi">
+          </div>
+          <div class="form-row">
+            <label>State:</label>
+            <input type="text" id="branch-state-input" value="Delhi NCR" required>
+          </div>
+          <div class="form-row">
+            <label>Pincode:</label>
+            <input type="text" id="branch-pincode-input" required placeholder="110001">
+          </div>
+        </div>
+        <div class="form-grid-3">
+          <div class="form-row">
+            <label>Support Phone:</label>
+            <input type="text" id="branch-phone-input" placeholder="+91-11-23456789">
+          </div>
+          <div class="form-row">
+            <label>Branch GSTIN:</label>
+            <input type="text" id="branch-gstin-input" placeholder="07AAACR7055K1Z1">
+          </div>
+          <div class="form-row">
+            <label>Assigned Store Manager:</label>
+            <input type="text" id="branch-manager-input" placeholder="e.g. Sunil Mehra">
+          </div>
+        </div>
+        <div class="form-actions">
+          <button type="submit" class="btn-primary">Register Store Branch</button>
+          <button type="button" id="cancel-branch-btn" class="btn-secondary">Cancel</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- =================================================================== -->
+  <!-- MODAL 14: INTER-BRANCH STOCK TRANSFER                               -->
+  <!-- =================================================================== -->
+  <div id="modal-stock-transfer" class="modal-overlay hidden">
+    <div class="modal-card wide">
+      <div class="modal-header">
+        <h3><i class="fa-solid fa-truck-arrow-right"></i> Inter-Branch Stock Transfer (Atomic Movement)</h3>
+        <button id="close-transfer-modal-btn" class="close-modal-btn">&times;</button>
+      </div>
+      <form id="transfer-stock-form" class="modal-form">
+        <div class="form-grid-2">
+          <div class="form-row">
+            <label>Source Branch (Transfer Out):</label>
+            <select id="transfer-from-select" required>
+              <!-- Populated dynamically -->
+            </select>
+          </div>
+          <div class="form-row">
+            <label>Destination Branch (Transfer In):</label>
+            <select id="transfer-to-select" required>
+              <!-- Populated dynamically -->
+            </select>
+          </div>
+        </div>
+        <div class="form-row">
+          <label>Select Product / SKU Barcode:</label>
+          <select id="transfer-product-select" required>
+            <!-- Populated dynamically -->
+          </select>
+        </div>
+        <div class="form-grid-2">
+          <div class="form-row">
+            <label>Transfer Quantity:</label>
+            <input type="number" id="transfer-qty-input" min="1" step="1" required placeholder="e.g. 10">
+          </div>
+          <div class="form-row">
+            <label>Reason / Transfer Notes:</label>
+            <input type="text" id="transfer-reason-input" value="Stock rebalancing between branches" required>
+          </div>
+        </div>
+        <div class="form-actions">
+          <button type="submit" class="btn-primary">
+            <i class="fa-solid fa-arrow-right-arrow-left"></i> Execute Atomic Stock Transfer
+          </button>
+          <button type="button" id="cancel-transfer-btn" class="btn-secondary">Cancel</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- =================================================================== -->
+  <!-- MODAL 15: DIGITAL MEMBERSHIP CARD & QR                               -->
+  <!-- =================================================================== -->
+  <div id="modal-member-card" class="modal-overlay hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3><i class="fa-solid fa-id-card"></i> Digital Customer Membership Card</h3>
+        <button id="close-card-modal-btn" class="close-modal-btn">&times;</button>
+      </div>
+      <div class="modal-body-padded">
+        <div class="membership-card-digital">
+          <div class="card-top-row">
+            <div class="card-brand">
+              <i class="fa-solid fa-store"></i>
+              <span>APEX ENTERPRISE RETAIL</span>
+            </div>
+            <span class="card-tier-tag" id="card-tier-tag">GOLD MEMBER</span>
+          </div>
+          <div class="card-body-row">
+            <div class="card-member-info">
+              <h4 id="card-cust-name">Rahul Sharma</h4>
+              <p id="card-cust-code">MEM-9810188442</p>
+              <p id="card-cust-phone" style="font-size: 11px; margin-top: 4px;">+91 98101 88442</p>
+            </div>
+            <div class="card-qr-box" id="card-qr-container">
+              <canvas id="member-qr-canvas" width="80" height="80"></canvas>
+            </div>
+          </div>
+          <div class="card-bottom-row">
+            <div class="card-stat-col">
+              <small>Store Footfall</small>
+              <strong id="card-stat-visits">14 Visits</strong>
+            </div>
+            <div class="card-stat-col">
+              <small>Reward Points</small>
+              <strong id="card-stat-points">184 Pts</strong>
+            </div>
+            <div class="card-stat-col">
+              <small>Valid Storewide</small>
+              <strong style="color: #4ade80;">ACTIVE</strong>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button onclick="window.print()" class="btn-primary"><i class="fa-solid fa-print"></i> Print Member Card</button>
+        <button id="dismiss-card-btn" class="btn-secondary">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- =================================================================== -->
+  <!-- MODAL 16: SCAN MEMBERSHIP QR CODE                                    -->
+  <!-- =================================================================== -->
+  <div id="modal-scan-member-qr" class="modal-overlay hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3><i class="fa-solid fa-qrcode"></i> Scan Customer Membership QR</h3>
+        <button id="close-scan-modal-btn" class="close-modal-btn">&times;</button>
+      </div>
+      <div class="modal-body-padded text-center">
+        <div style="background: var(--bg-hover); padding: 25px; border-radius: 12px; margin-bottom: 15px; border: 2px dashed var(--border-subtle);">
+          <i class="fa-solid fa-camera" style="font-size: 42px; color: var(--primary-accent); margin-bottom: 12px;"></i>
+          <h4>Point Scanner or Camera at Member QR</h4>
+          <p style="font-size: 12px; color: var(--text-secondary); margin-top: 4px;">Supports camera optical scan, 2D USB barcode guns, or typing membership ID</p>
+        </div>
+        <div class="form-row">
+          <label style="text-align: left;">Or enter scanned QR Payload / Membership Code:</label>
+          <input type="text" id="manual-qr-payload-input" placeholder="e.g. MEM-9810188442 or 9810188442">
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button id="btn-submit-scanned-qr" class="btn-primary"><i class="fa-solid fa-check"></i> Recognize Customer</button>
+        <button id="dismiss-scan-modal-btn" class="btn-secondary">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- =================================================================== -->
+  <!-- MODAL 17: CUSTOMER SHOPPING HABITS & INSIGHTS                        -->
+  <!-- =================================================================== -->
+  <div id="modal-customer-insights" class="modal-overlay hidden">
+    <div class="modal-card wide">
+      <div class="modal-header">
+        <h3 id="insights-modal-title"><i class="fa-solid fa-chart-pie"></i> Customer Shopping Habits & Preferences</h3>
+        <button id="close-insights-modal-btn" class="close-modal-btn">&times;</button>
+      </div>
+      <div class="modal-body-padded" style="max-height: 70vh; overflow-y: auto;">
+        <div class="dashboard-charts-grid" style="grid-template-columns: 1fr 1fr; margin-bottom: 20px;">
+          <div class="card">
+            <h4><i class="fa-solid fa-tags"></i> Top Preferred Product Categories</h4>
+            <div id="cust-insights-categories" class="mt-15">
+              <!-- Dynamically rendered progress bars -->
+            </div>
+          </div>
+          <div class="card">
+            <h4><i class="fa-solid fa-heart text-red"></i> Most Frequently Purchased Items</h4>
+            <table class="data-table mt-10">
+              <thead>
+                <tr>
+                  <th>Product</th>
+                  <th class="text-center">Units</th>
+                  <th class="text-right">Total Spent</th>
+                </tr>
+              </thead>
+              <tbody id="cust-insights-products-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card">
+          <h4><i class="fa-solid fa-clock-rotate-left"></i> Itemized Purchase Invoice History</h4>
+          <div id="cust-insights-orders-list" class="mt-10">
+            <!-- Dynamically rendered order items -->
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- TOAST NOTIFICATIONS CONTAINER -->
+  <div id="toast-container" class="toast-container"></div>
+
+  <!-- APP CONTROLLER SCRIPT -->
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
