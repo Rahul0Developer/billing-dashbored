@@ -1366,12 +1366,21 @@ def export_expenses_report_csv(actor: User = Depends(require_manager)):
 
 
 # ============================================================================
-# STATIC FRONTEND SERVING
+# STATIC FRONTEND SERVING (React SPA built to frontend/dist; legacy vanilla
+# index.html is served only if a build has not been produced yet)
 # ============================================================================
 frontend_dir = BASE_DIR / "frontend"
 app.mount("/static", StaticFiles(directory=str(frontend_dir)), name="static")
 
+_dist_dir = frontend_dir / "dist"
+
 
 @app.get("/")
 def serve_index():
+    if (_dist_dir / "index.html").exists():
+        return FileResponse(_dist_dir / "index.html")
     return FileResponse(frontend_dir / "index.html")
+
+
+if _dist_dir.exists():
+    app.mount("/app", StaticFiles(directory=str(_dist_dir), html=True), name="spa")
