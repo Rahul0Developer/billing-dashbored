@@ -835,6 +835,40 @@ class RetailRepository:
                 for r in rows
             ]
 
+    def record_audit_log(
+        self,
+        actor_id: str,
+        action: str,
+        entity_type: str,
+        entity_id: str,
+        details: str = "",
+        timestamp: Optional[datetime] = None,
+    ) -> None:
+        """Append an immutable security-audit record (voids, PIN overrides,
+        stock adjustments, shift closes, price changes, etc.)."""
+        import uuid as _uuid
+        with self.db.connection() as conn:
+            conn.execute(
+                "INSERT INTO audit_logs (id, user_id, action, entity_type, entity_id, details, timestamp) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?);",
+                (
+                    f"AUD-{_uuid.uuid4().hex[:12].upper()}",
+                    actor_id or "SYSTEM",
+                    action,
+                    entity_type,
+                    entity_id,
+                    details,
+                    (timestamp or datetime.now()).isoformat(),
+                ),
+            )
+
+    def list_audit_logs(self, limit: int = 100) -> List[Dict[str, Any]]:
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM audit_logs ORDER BY timestamp DESC LIMIT ?;", (limit,)
+            ).fetchall()
+            return [dict(r) for r in rows]
+
     # ========================================================================
     # ORDER / BILLING & SPLIT PAYMENTS REPOSITORY
     # ========================================================================

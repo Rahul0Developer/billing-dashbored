@@ -116,8 +116,9 @@ CREATE TABLE IF NOT EXISTS stock_movements (
     branch_id TEXT NOT NULL DEFAULT 'BR-DEL-01',
     destination_branch_id TEXT,
     user_id TEXT NOT NULL DEFAULT 'SYSTEM',
-    timestamp TEXT NOT NULL,
-    FOREIGN KEY(barcode) REFERENCES products(barcode) ON DELETE CASCADE
+    timestamp TEXT NOT NULL
+    -- No FK on barcode: the movement ledger is an append-only audit trail that
+    -- must survive product deletion (and accept synthetic system entries).
 );
 
 -- Sales Orders / Invoices
@@ -379,6 +380,40 @@ class DatabaseManager:
                 cursor.execute("ALTER TABLE stock_movements ADD COLUMN branch_id TEXT NOT NULL DEFAULT 'BR-DEL-01';")
             if "destination_branch_id" not in mov_cols:
                 cursor.execute("ALTER TABLE stock_movements ADD COLUMN destination_branch_id TEXT;")
+
+            # One-time migration: drop legacy FK(barcode) on stock_movements.
+            # The movement ledger is an append-only audit trail; it must accept
+            # synthetic system entries and survive product deletion. SQLite
+            # cannot DROP CONSTRAINT, so rebuild the table preserving rows.
+            _mov_sql = cursor.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='stock_movements';"
+            ).fetchone()
+            if _mov_sql and _mov_sql[0] and "FOREIGN KEY" in _mov_sql[0]:
+                cols = [r[1] for r in cursor.execute("PRAGMA table_info(stock_movements);").fetchall()]
+                col_list = ", ".join(cols)
+                # Rebuild the DDL from PRAGMA column metadata (type + notnull +
+                # default, PK kept), dropping every FOREIGN KEY clause.
+                coldefs = []
+                for cid, cname, ctype, notnull, dflt, pk in cursor.execute(
+                    "PRAGMA table_info(stock_movements);"
+                ).fetchall():
+                    d = f"{cname} {ctype or 'TEXT'}"
+                    if pk:
+                        d += " PRIMARY KEY"
+                    if notnull and not pk:
+                        d += " NOT NULL"
+                    if dflt is not None:
+                        d += f" DEFAULT {dflt}"
+                    coldefs.append(d)
+                new_ddl = "CREATE TABLE stock_movements_new (" + ", ".join(coldefs) + ");"
+                cursor.execute("PRAGMA foreign_keys=OFF;")
+                try:
+                    cursor.execute(new_ddl)
+                    cursor.execute(f"INSERT INTO stock_movements_new ({col_list}) SELECT {col_list} FROM stock_movements;")
+                    cursor.execute("DROP TABLE stock_movements;")
+                    cursor.execute("ALTER TABLE stock_movements_new RENAME TO stock_movements;")
+                finally:
+                    cursor.execute("PRAGMA foreign_keys=ON;")
 
             # users table branch migrations
             user_cols = [r[1] for r in cursor.execute("PRAGMA table_info(users);").fetchall()]

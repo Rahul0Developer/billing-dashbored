@@ -182,6 +182,18 @@ class LoginRequest(BaseModel):
     pin: str = Field(..., min_length=3, max_length=8)
 
 
+class UserCreateRequest(BaseModel):
+    username: str = Field(..., min_length=3, max_length=64, pattern=r"^[A-Za-z0-9._-]+$")
+    full_name: str = Field(..., min_length=1, max_length=120)
+    role: str = Field(..., description="One of UserRole values (CASHIER, SUPERVISOR, STORE_MANAGER, ACCOUNTANT, ADMIN)")
+    pin: str = Field(..., min_length=4, max_length=8)
+    branch_id: str = Field(default="BR-DEL-01", max_length=32)
+
+
+class UserStatusRequest(BaseModel):
+    is_active: bool
+
+
 # Global Exception Handlers for POS Transaction Engine
 @app.exception_handler(InsufficientStockError)
 async def insufficient_stock_handler(request: Request, exc: InsufficientStockError):
@@ -566,6 +578,7 @@ def create_or_update_product(req: ProductCreateRequest, actor: User = Depends(re
     repo.save_product(prod)
     search_engine.index_product(prod)
     inventory_pq.push(prod)
+    repo.record_audit_log(actor.id, "PRODUCT_UPSERT", "PRODUCT", prod.barcode, f"price={prod.selling_price} stock={prod.stock_quantity}")
     return {"success": True, "barcode": prod.barcode, "message": "Product saved successfully"}
 
 
@@ -794,20 +807,27 @@ def get_a4_tax_invoice(bill_number: str, actor: User = Depends(require_staff)):
 
 @app.post("/api/orders/{bill_number}/void")
 def void_bill(bill_number: str, req: VoidOrderRequest, actor: User = Depends(require_manager)):
-    return pos_service.void_order(bill_number, req.manager_pin, req.reason)
+    result = pos_service.void_order(bill_number, req.manager_pin, req.reason)
+    repo.record_audit_log(actor.id, "BILL_VOID", "ORDER", bill_number, f"reason={req.reason}")
+    return result
 
 
 # --- RETURNS & REFUNDS ---
 @app.post("/api/returns/process")
 def process_customer_return(req: ProcessReturnRequest, actor: User = Depends(require_manager)):
     items = [{"barcode": i.barcode, "quantity": i.quantity} for i in req.items]
-    return returns_service.process_return(
+    result = returns_service.process_return(
         bill_number=req.bill_number,
         items_to_return=items,
         manager_pin=req.manager_pin,
         cashier_id=req.cashier_id,
         reason=req.reason
     )
+    repo.record_audit_log(
+        actor.id, "RETURN_PROCESSED", "ORDER", req.bill_number,
+        f"refund={result.get('refund_amount') if isinstance(result, dict) else ''} reason={req.reason}"
+    )
+    return result
 
 
 @app.get("/api/returns")
@@ -870,11 +890,13 @@ def record_shift_cash_drop(req: CashDropRequest, actor: User = Depends(require_s
 @app.post("/api/shifts/close")
 def close_shift_and_generate_z_report(req: CloseShiftRequest, actor: User = Depends(require_manager)):
     try:
-        return register_service.close_shift_z_report(
+        result = register_service.close_shift_z_report(
             cashier_id=req.cashier_id,
             actual_counted_cash=req.closing_counted_cash,
             closing_notes=req.notes
         )
+        repo.record_audit_log(actor.id, "SHIFT_CLOSE", "CASH_SHIFT", req.cashier_id, f"notes={req.notes}")
+        return result
     except Exception as e:
         raise _safe_http_error(e, "Request could not be processed due to a server-side validation error.")
 
@@ -909,13 +931,18 @@ def list_shift_history(actor: User = Depends(require_manager)):
 @app.post("/api/inventory/adjust")
 def adjust_inventory_stock(req: StockAdjustmentRequest, actor: User = Depends(require_inventory)):
     try:
-        return inventory_service.adjust_stock(
+        result = inventory_service.adjust_stock(
             barcode=req.barcode,
             new_quantity=req.new_quantity,
             reason_type=req.reason_type,
             notes=req.notes,
             branch_id=req.branch_id,
         )
+        repo.record_audit_log(
+            actor.id, "STOCK_ADJUST", "PRODUCT", req.barcode,
+            f"new_qty={req.new_quantity} type={req.reason_type} notes={req.notes}"
+        )
+        return result
     except Exception as e:
         raise _safe_http_error(e, "Request could not be processed due to a server-side validation error.")
 
@@ -958,10 +985,16 @@ def list_stock_movements(limit: int = 50, branch_id: Optional[str] = Query(None)
             "reason": m.reason,
             "user_id": m.user_id,
             "branch_id": getattr(m, "branch_id", "BR-DEL-01"),
-            "date": m.created_at.strftime("%d-%b-%Y %I:%M %p")
+            "date": m.timestamp.strftime("%d-%b-%Y %I:%M %p")
         }
         for m in movements
     ]
+
+
+@app.get("/api/audit/logs")
+def list_audit_logs(limit: int = 100, actor: User = Depends(require_manager)):
+    """Security audit trail: PIN overrides, voids, returns, stock adjustments."""
+    return repo.list_audit_logs(limit=min(max(limit, 1), 500))
 
 
 @app.get("/api/inventory/barcode/{barcode}")
@@ -1167,10 +1200,50 @@ def get_store_users(actor: User = Depends(require_manager)):
             "id": u.id,
             "username": u.username,
             "full_name": u.full_name,
-            "role": u.role.value
+            "role": u.role.value,
+            "branch_id": getattr(u, "branch_id", "BR-DEL-01"),
+            "is_active": u.is_active,
         }
         for u in users
     ]
+
+
+@app.post("/api/auth/users")
+def create_store_user(req: UserCreateRequest, actor: User = Depends(require_roles(UserRole.ADMIN))):
+    """Provision a new staff account. PIN is hashed before storage — never plaintext."""
+    try:
+        role = UserRole(req.role.upper())
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"Unknown role '{req.role}'.")
+    if repo.get_user_by_username(req.username.strip()):
+        raise HTTPException(status_code=409, detail="Username already exists.")
+    import uuid as _uuid
+    from datetime import datetime as _dt
+    user = User(
+        id=f"USR-{_uuid.uuid4().hex[:10].upper()}",
+        username=req.username.strip().lower(),
+        full_name=req.full_name.strip(),
+        role=role,
+        pin=security.hash_credential(req.pin),  # bcrypt/PBKDF2 hash at rest
+        branch_id=req.branch_id.strip() or "BR-DEL-01",
+        is_active=True,
+    )
+    repo.save_user(user)
+    repo.record_audit_log(actor.id, "USER_CREATED", "USER", user.id, f"username={user.username} role={role.value}")
+    return {"success": True, "id": user.id, "username": user.username, "role": role.value}
+
+
+@app.patch("/api/auth/users/{user_id}/status")
+def set_store_user_status(user_id: str, req: UserStatusRequest, actor: User = Depends(require_roles(UserRole.ADMIN))):
+    target = repo.get_user_by_id(user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found.")
+    if target.id == actor.id:
+        raise HTTPException(status_code=400, detail="You cannot deactivate your own account.")
+    target.is_active = req.is_active
+    repo.save_user(target)
+    repo.record_audit_log(actor.id, "USER_STATUS_CHANGE", "USER", target.id, f"is_active={req.is_active}")
+    return {"success": True, "id": target.id, "is_active": target.is_active}
 
 
 @app.post("/api/auth/verify-pin")
@@ -1217,28 +1290,17 @@ def verify_manager_pin(req: VerifyPinRequest, actor: User = Depends(require_mana
 def _audit_pin_event(actor: User, matched: Optional[User], req: VerifyPinRequest) -> None:
     """Write an immutable audit record for every manager-PIN override attempt."""
     try:
-        import uuid as _uuid
-        from datetime import datetime as _dt
-        from backend.models.domain import StockMovement, StockMovementType
-
-        repo.record_stock_movement(StockMovement(
-            id=f"AUDIT-{_uuid.uuid4().hex[:12].upper()}",
-            barcode="SYSTEM-AUTH",
-            movement_type=StockMovementType.MANUAL_CORRECTION,
-            quantity_change=0,
-            previous_stock=0,
-            new_stock=0,
-            reason=(
-                f"PIN_OVERRIDE {'GRANTED' if matched else 'DENIED'}: "
+        repo.record_audit_log(
+            actor_id=actor.id,
+            action="PIN_OVERRIDE_GRANTED" if matched else "PIN_OVERRIDE_DENIED",
+            entity_type="AUTH",
+            entity_id=matched.id if matched else "NONE",
+            details=(
                 f"actor={actor.username}({actor.role.value}) "
                 f"matched={'yes:' + matched.username if matched else 'no'} "
                 f"allowed_roles={req.allowed_roles}"
             ),
-            reference_id="AUTH-AUDIT",
-            branch_id=actor.branch_id or "BR-DEL-01",
-            user_id=actor.id,
-            timestamp=_dt.now(),
-        ))
+        )
     except Exception:  # auditing must never break the auth flow
         logger.exception("Failed to write PIN override audit record")
 
