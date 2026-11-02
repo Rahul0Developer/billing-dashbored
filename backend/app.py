@@ -5,17 +5,27 @@ expense management, customer footfall tracking, shifts, returns, and inventory.
 """
 
 import csv
+from collections import deque
 from datetime import date, datetime
 from decimal import Decimal
+import html as html_lib
 import io
+import logging
+import os
+import re
+import threading
+import time
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
-from fastapi import FastAPI, HTTPException, Query, Response, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Response, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, PlainTextResponse, HTMLResponse, JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
+
+from backend import security
+from backend.models.domain import User, UserRole
 
 from backend.config import STORE_PROFILE, DATABASE_PATH, BASE_DIR
 from backend.models.domain import CustomerTier, PaymentMethod, ExpenseCategory, Product, UserRole, round_curr
@@ -50,13 +60,127 @@ app = FastAPI(
     version="3.0"
 )
 
+# ---------------------------------------------------------------------------
+# CORS: locked down to an explicit, configurable origin allow-list.
+# Wildcard "*" with credentials is forbidden; override via POS_ALLOWED_ORIGINS
+# (comma-separated) for production deployments behind a known domain.
+# ---------------------------------------------------------------------------
+_default_origins = "http://localhost:8000,http://127.0.0.1:8000,http://localhost:3000"
+ALLOWED_ORIGINS = [o.strip() for o in os.environ.get("POS_ALLOWED_ORIGINS", _default_origins).split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "DELETE"],
+    allow_headers=["Content-Type", "Authorization"],
 )
+
+
+# ---------------------------------------------------------------------------
+# SECURITY HEADERS + RATE LIMITING MIDDLEWARE
+# ---------------------------------------------------------------------------
+class SlidingWindowRateLimiter:
+    """In-memory per-client sliding-window limiter (no external deps)."""
+
+    def __init__(self, capacity_per_minute: int = 600) -> None:
+        self.capacity = capacity_per_minute
+        self._lock = threading.Lock()
+        self._hits: Dict[str, deque] = {}
+
+    def allow(self, identity: str) -> bool:
+        now = time.monotonic()
+        with self._lock:
+            bucket = self._hits.setdefault(identity, deque())
+            while bucket and now - bucket[0] > 60.0:
+                bucket.popleft()
+            if len(bucket) >= self.capacity:
+                return False
+            bucket.append(now)
+            return True
+
+
+rate_limiter = SlidingWindowRateLimiter(
+    capacity_per_minute=int(os.environ.get("POS_RATE_LIMIT_PER_MINUTE", "600"))
+)
+AUTH_RATE_LIMITER = SlidingWindowRateLimiter(capacity_per_minute=10)
+
+
+@app.middleware("http")
+async def security_middleware(request: Request, call_next):
+    client_ip = request.client.host if request.client else "unknown"
+
+    # Tighter budget for credential endpoints (login / manager PIN checks).
+    if request.url.path in ("/api/auth/login", "/api/auth/verify-pin"):
+        if not AUTH_RATE_LIMITER.allow(client_ip):
+            return JSONResponse(status_code=429, content={"detail": "Too many authentication attempts. Please wait a minute."})
+    elif not rate_limiter.allow(client_ip):
+        return JSONResponse(status_code=429, content={"detail": "Rate limit exceeded. Slow down requests."})
+
+    response = await call_next(request)
+    # Defense-in-depth headers for the embedded SPA and invoice HTML.
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "same-origin"
+    response.headers["Permissions-Policy"] = "camera=(self), geolocation=(), microphone=()"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; "
+        "style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; font-src 'self' https://cdnjs.cloudflare.com data:; "
+        "img-src 'self' data: https:; connect-src 'self'"
+    )
+    return response
+
+
+# ---------------------------------------------------------------------------
+# AUTH DEPENDENCIES (signed session tokens + role-based access control)
+# ---------------------------------------------------------------------------
+def _extract_token(request: Request) -> Optional[str]:
+    header = request.headers.get("Authorization", "")
+    if header.lower().startswith("bearer "):
+        return header[7:].strip()
+    return request.cookies.get("pos_session") or None
+
+
+def get_current_user(request: Request) -> User:
+    """Mandatory authentication for every mutating and PII-bearing endpoint."""
+    payload = security.decode_token(_extract_token(request) or "")
+    if not payload:
+        raise HTTPException(status_code=401, detail="Authentication required. Please log in.")
+    # `repo` is initialized at module scope below; resolved lazily at request time.
+    user = _repository_ref().get_user_by_id(payload.get("uid", ""))
+    if not user or not user.is_active:
+        raise HTTPException(status_code=401, detail="Session user no longer exists or is disabled.")
+    return user
+
+
+def _repository_ref():
+    from backend import app as _self  # late binding to the module-level repo
+    return _self.repo
+
+
+def require_roles(*roles: UserRole):
+    allowed = {r.value for r in roles}
+
+    def dependency(user: User = Depends(get_current_user)) -> User:
+        if user.role.value not in allowed:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Insufficient privileges. Requires one of: {', '.join(sorted(allowed))}.",
+            )
+        return user
+
+    return dependency
+
+
+require_manager = require_roles(UserRole.ADMIN, UserRole.STORE_MANAGER)
+require_staff = require_roles(UserRole.ADMIN, UserRole.STORE_MANAGER, UserRole.CASHIER, UserRole.INVENTORY_MANAGER)
+require_inventory = require_roles(UserRole.ADMIN, UserRole.STORE_MANAGER, UserRole.INVENTORY_MANAGER)
+
+
+class LoginRequest(BaseModel):
+    username: str = Field(..., min_length=1, max_length=64)
+    pin: str = Field(..., min_length=3, max_length=8)
+
 
 # Global Exception Handlers for POS Transaction Engine
 @app.exception_handler(InsufficientStockError)
@@ -118,141 +242,253 @@ register_service = RegisterShiftService(repo)
 inventory_service = InventoryService(repo, inventory_pq, search_engine)
 
 
+# ---------------------------------------------------------------------------
+# SECURITY: Seed real provisioned staff accounts with HASHED PINs.
+# There are NO hardcoded universal override PINs anywhere in this app.
+# Demo credentials below exist only so the UI is usable out of the box;
+# change them immediately in production via /api/auth/users provisioning.
+# ---------------------------------------------------------------------------
+_SEEDED_STAFF = [
+    ("ADMIN-01", "admin", "Super Admin", UserRole.ADMIN, "9999", "BR-DEL-01"),
+    ("MGR-01", "vmalhotra", "Vikram Malhotra", UserRole.STORE_MANAGER, "2222", "BR-DEL-01"),
+    ("CASHIER-01", "rsharma", "Rajesh Sharma", UserRole.CASHIER, "1111", "BR-DEL-01"),
+    ("CASHIER-02", "ppatel", "Priya Patel", UserRole.CASHIER, "1212", "BR-DEL-01"),
+]
+
+
+def seed_default_staff() -> None:
+    for uid, username, full_name, role, raw_pin, branch_id in _SEEDED_STAFF:
+        if repo.get_user_by_id(uid):
+            continue
+        repo.save_user(
+            User(
+                id=uid,
+                username=username,
+                full_name=full_name,
+                role=role,
+                pin=security.hash_credential(raw_pin),  # stored ONLY as bcrypt/PBKDF2 hash
+                branch_id=branch_id,
+                is_active=True,
+            )
+        )
+
+
+seed_default_staff()
+
+logger = logging.getLogger("apex.pos")
+
+
+def _safe_http_error(exc: Exception, fallback_detail: str) -> "HTTPException":
+    """Return a client-safe error message; log internals server-side only."""
+    from backend.models.exceptions import POSTransactionError
+
+    if isinstance(exc, POSTransactionError):
+        return HTTPException(status_code=400, detail=exc.message)
+    if isinstance(exc, (ValueError, LookupError)):
+        logger.warning("Rejected request: %s", exc, exc_info=True)
+        return HTTPException(status_code=400, detail=str(exc)[:300])
+    logger.error("Unhandled service error: %s", exc, exc_info=True)
+    return HTTPException(status_code=400, detail=fallback_detail)
+
+
 # ============================================================================
 # PYDANTIC SCHEMAS
 # ============================================================================
 class CartItemInput(BaseModel):
-    barcode: str
-    quantity: int = 1
+    barcode: str = Field(..., min_length=3, max_length=64)
+    quantity: int = Field(1, ge=1, le=1000)
 
 
 class CartCalculationRequest(BaseModel):
-    items: List[CartItemInput]
-    customer_phone: Optional[str] = None
-    points_to_redeem: int = 0
-    branch_id: str = "BR-DEL-01"
+    items: List[CartItemInput] = Field(..., min_length=1, max_length=200)
+    customer_phone: Optional[str] = Field(None, max_length=32)
+    points_to_redeem: int = Field(0, ge=0, le=1_000_000)
+    branch_id: str = Field("BR-DEL-01", max_length=32)
 
 
 class CheckoutRequest(BaseModel):
-    items: List[CartItemInput]
-    payment_method: str = "CASH"
-    tendered_amount: float
-    cashier_id: str = "CASHIER-01"
-    cashier_name: str = "Rajesh Sharma"
-    customer_phone: Optional[str] = None
-    customer_name: Optional[str] = None
-    points_to_redeem: int = 0
-    branch_id: str = "BR-DEL-01"
-    split_payments: Optional[List[Dict[str, Any]]] = None
+    items: List[CartItemInput] = Field(..., min_length=1, max_length=200)
+    payment_method: str = Field("CASH", max_length=32)
+    tendered_amount: float = Field(..., ge=0, le=100_000_000)
+    cashier_id: str = Field("CASHIER-01", max_length=32)
+    cashier_name: str = Field("Rajesh Sharma", max_length=80)
+    customer_phone: Optional[str] = Field(None, max_length=32)
+    customer_name: Optional[str] = Field(None, max_length=80)
+    points_to_redeem: int = Field(0, ge=0, le=1_000_000)
+    branch_id: str = Field("BR-DEL-01", max_length=32)
+    split_payments: Optional[List[Dict[str, Any]]] = Field(None, max_length=10)
+
+    @field_validator("payment_method")
+    @classmethod
+    def _valid_payment_method(cls, v: str) -> str:
+        allowed = {m.value for m in PaymentMethod}
+        uv = v.strip().upper()
+        if uv not in allowed:
+            raise ValueError(f"Unsupported payment method '{v}'.")
+        return uv
 
 
 class ExpenseCreateRequest(BaseModel):
-    category: str
-    amount: float
-    description: str
-    expense_date: Optional[str] = None
-    payment_mode: str = "BANK_TRANSFER"
-    vendor_name: str = ""
-    receipt_reference: str = ""
-    branch_id: str = "BR-DEL-01"
+    category: str = Field(..., min_length=2, max_length=40)
+    amount: float = Field(..., gt=0, le=100_000_000)
+    description: str = Field(..., min_length=1, max_length=500)
+    expense_date: Optional[str] = Field(None, max_length=32)
+    payment_mode: str = Field("BANK_TRANSFER", max_length=40)
+    vendor_name: str = Field("", max_length=120)
+    receipt_reference: str = Field("", max_length=80)
+    branch_id: str = Field("BR-DEL-01", max_length=32)
 
 
 class ProductCreateRequest(BaseModel):
-    barcode: str
-    sku: str
-    name: str
-    category: str
-    brand: str
-    unit: str = "pcs"
-    cost_price: float
-    selling_price: float
-    mrp: float
-    stock_quantity: int
-    reorder_level: int = 10
-    tax_rate_percent: float = 5.0
+    barcode: str = Field(..., min_length=3, max_length=64)
+    sku: str = Field(..., min_length=1, max_length=64)
+    name: str = Field(..., min_length=1, max_length=200)
+    category: str = Field(..., min_length=1, max_length=80)
+    brand: str = Field(..., min_length=1, max_length=80)
+    unit: str = Field("pcs", min_length=1, max_length=16)
+    cost_price: float = Field(..., ge=0, le=10_000_000)
+    selling_price: float = Field(..., ge=0, le=10_000_000)
+    mrp: float = Field(..., ge=0, le=10_000_000)
+    stock_quantity: int = Field(..., ge=0, le=1_000_000)
+    reorder_level: int = Field(10, ge=0, le=100_000)
+    tax_rate_percent: float = Field(5.0, ge=0, le=100)
 
 
 class ReturnItemInput(BaseModel):
-    barcode: str
-    quantity: int = 1
+    barcode: str = Field(..., min_length=3, max_length=64)
+    quantity: int = Field(1, ge=1, le=1000)
 
 
 class ProcessReturnRequest(BaseModel):
-    bill_number: str
-    items: List[ReturnItemInput]
-    manager_pin: str
-    cashier_id: str = "CASHIER-01"
-    reason: str = "Customer Return / Exchange"
+    bill_number: str = Field(..., min_length=3, max_length=64)
+    items: List[ReturnItemInput] = Field(..., min_length=1, max_length=200)
+    manager_pin: str = Field(..., min_length=3, max_length=8)
+    cashier_id: str = Field("CASHIER-01", max_length=32)
+    reason: str = Field("Customer Return / Exchange", max_length=300)
 
 
 class VoidOrderRequest(BaseModel):
-    manager_pin: str
-    reason: str = "Cashier Void / Order Cancelled"
+    manager_pin: str = Field(..., min_length=3, max_length=8)
+    reason: str = Field("Cashier Void / Order Cancelled", max_length=300)
 
 
 class StartShiftRequest(BaseModel):
-    cashier_id: str = "CASHIER-01"
-    cashier_name: str = "Rajesh Sharma"
-    opening_float: float = 2000.0
-    notes: str = "Shift Opened"
-    branch_id: str = "BR-DEL-01"
+    cashier_id: str = Field("CASHIER-01", max_length=32)
+    cashier_name: str = Field("Rajesh Sharma", max_length=80)
+    opening_float: float = Field(2000.0, ge=0, le=1_000_000)
+    notes: str = Field("Shift Opened", max_length=300)
+    branch_id: str = Field("BR-DEL-01", max_length=32)
 
 
 class CashDropRequest(BaseModel):
-    cashier_id: str = "CASHIER-01"
-    amount: float
-    reason: str = "Midday Safe Drop"
+    cashier_id: str = Field("CASHIER-01", max_length=32)
+    amount: float = Field(..., gt=0, le=10_000_000)
+    reason: str = Field("Midday Safe Drop", max_length=300)
 
 
 class CloseShiftRequest(BaseModel):
-    cashier_id: str = "CASHIER-01"
-    closing_counted_cash: float
-    notes: str = "End of Day Register Close"
+    cashier_id: str = Field("CASHIER-01", max_length=32)
+    closing_counted_cash: float = Field(..., ge=0, le=100_000_000)
+    notes: str = Field("End of Day Register Close", max_length=300)
 
 
 class StockAdjustmentRequest(BaseModel):
-    barcode: str
-    new_quantity: int
-    reason_type: str = "DISCREPANCY"
-    notes: str = ""
-    branch_id: str = "BR-DEL-01"
+    barcode: str = Field(..., min_length=3, max_length=64)
+    new_quantity: int = Field(..., ge=0, le=1_000_000)
+    reason_type: str = Field("DISCREPANCY", max_length=40)
+    notes: str = Field("", max_length=300)
+    branch_id: str = Field("BR-DEL-01", max_length=32)
 
 
 class BranchCreateRequest(BaseModel):
-    code: str
-    name: str
-    address: str
-    city: str
-    state: str = "Delhi NCR"
-    pincode: str = "201014"
-    phone: str = ""
-    email: str = ""
-    gstin: str = ""
-    manager_name: str = ""
+    code: str = Field(..., min_length=2, max_length=16)
+    name: str = Field(..., min_length=2, max_length=120)
+    address: str = Field(..., min_length=2, max_length=200)
+    city: str = Field(..., min_length=1, max_length=80)
+    state: str = Field("Delhi NCR", max_length=80)
+    pincode: str = Field("201014", min_length=4, max_length=10)
+    phone: str = Field("", max_length=30)
+    email: str = Field("", max_length=120)
+    gstin: str = Field("", max_length=20)
+    manager_name: str = Field("", max_length=80)
     is_headquarters: bool = False
 
 
 class InterBranchTransferRequest(BaseModel):
-    from_branch_id: str
-    to_branch_id: str
-    barcode: str
-    quantity: int
-    reason: str = "Stock rebalancing"
-    user_id: str = "STORE_MANAGER"
+    from_branch_id: str = Field(..., min_length=2, max_length=32)
+    to_branch_id: str = Field(..., min_length=2, max_length=32)
+    barcode: str = Field(..., min_length=3, max_length=64)
+    quantity: int = Field(..., ge=1, le=100_000)
+    reason: str = Field("Stock rebalancing", max_length=300)
 
 
 class BulkCSVImportRequest(BaseModel):
-    csv_content: str
+    csv_content: str = Field(..., min_length=1, max_length=250_000)
+
+    @field_validator("csv_content")
+    @classmethod
+    def _limit_rows(cls, v: str) -> str:
+        row_count = v.count("\n") + 1
+        if row_count > 2000:
+            raise ValueError("CSV import is limited to 2000 rows per request.")
+        return v
 
 
 class VerifyPinRequest(BaseModel):
-    pin: str
-    allowed_roles: Optional[List[str]] = None
+    pin: str = Field(..., min_length=3, max_length=8)
+    allowed_roles: Optional[List[str]] = Field(None, max_length=8)
 
 
 # ============================================================================
 # API ROUTES
 # ============================================================================
+
+# --- AUTHENTICATION (session token issuance) ---
+@app.post("/api/auth/login")
+def login(req: LoginRequest):
+    identity = f"login:{req.username.lower().strip()}"
+    if security.login_lockouts.is_locked(identity):
+        raise HTTPException(status_code=423, detail="Account temporarily locked after repeated failed attempts. Try again in 15 minutes.")
+
+    user = repo.get_user_by_username(req.username.strip())
+    ok, new_hash = (False, None)
+    if user and user.is_active:
+        ok, new_hash = user.verify_and_upgrade_pin(req.pin)
+        if ok and new_hash:
+            repo.upgrade_user_pin_hash(user.id, user.pin)
+
+    if not ok:
+        security.login_lockouts.register_failure(identity)
+        # Uniform message: never disclose whether the username exists.
+        raise HTTPException(status_code=401, detail="Invalid credentials.")
+
+    security.login_lockouts.reset(identity)
+    token = security.create_token({"uid": user.id, "role": user.role.value})
+    response = JSONResponse(
+        content={
+            "success": True,
+            "token": token,
+            "user": {
+                "id": user.id,
+                "username": user.username,
+                "name": user.full_name,
+                "role": user.role.value,
+                "branch_id": user.branch_id,
+            },
+        }
+    )
+    response.set_cookie(
+        "pos_session", token, httponly=True, samesite="lax", max_age=8 * 3600, secure=bool(os.environ.get("POS_COOKIE_SECURE"))
+    )
+    return response
+
+
+@app.post("/api/auth/logout")
+def logout():
+    response = JSONResponse(content={"success": True})
+    response.delete_cookie("pos_session")
+    return response
+
 
 @app.get("/api/health")
 def health_check():
