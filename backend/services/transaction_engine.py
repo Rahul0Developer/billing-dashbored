@@ -419,10 +419,20 @@ class POSTransactionEngine:
         - Deducts customer spend & loyalty points
         - Updates cashier shift refund deductions
         """
-        # Authorization check
+        # Authorization check -- only real provisioned manager/admin accounts.
+        # SECURITY: no hardcoded universal override PINs are ever honoured.
         users = self.repo.list_users()
-        authorized = any(u.role in [UserRole.ADMIN, UserRole.STORE_MANAGER] and u.verify_pin(manager_pin) for u in users)
-        if not authorized and manager_pin not in ["2222", "9999"]:
+        matched_manager = None
+        for u in users:
+            if u.role in (UserRole.ADMIN, UserRole.STORE_MANAGER):
+                ok, new_hash = u.verify_and_upgrade_pin(manager_pin)
+                if ok:
+                    if new_hash:
+                        # Transparently migrate legacy plaintext PIN to a hash.
+                        self.repo.upgrade_user_pin_hash(u.id, u.pin)
+                    matched_manager = u
+                    break
+        if not matched_manager:
             raise UnauthorizedManagerError("Valid Store Manager or Admin PIN is required to process refunds!")
 
         order = self.repo.get_order_by_bill_number(bill_number)
@@ -473,6 +483,7 @@ class POSTransactionEngine:
             cashier_id=cashier_id,
             refund_amount=total_refund,
             reason=reason,
+            authorized_by=matched_manager.id,
             branch_id=order_branch_id,
             created_at=datetime.now(),
         )
@@ -564,9 +575,19 @@ class POSTransactionEngine:
         - Reverses cashier shift sales
         - Sets order status to CANCELLED
         """
+        # Authorization check -- only real provisioned manager/admin accounts.
+        # SECURITY: no hardcoded universal override PINs are ever honoured.
         users = self.repo.list_users()
-        authorized = any(u.role in [UserRole.ADMIN, UserRole.STORE_MANAGER] and u.verify_pin(manager_pin) for u in users)
-        if not authorized and manager_pin not in ["2222", "9999"]:
+        matched_manager = None
+        for u in users:
+            if u.role in (UserRole.ADMIN, UserRole.STORE_MANAGER):
+                ok, new_hash = u.verify_and_upgrade_pin(manager_pin)
+                if ok:
+                    if new_hash:
+                        self.repo.upgrade_user_pin_hash(u.id, u.pin)
+                    matched_manager = u
+                    break
+        if not matched_manager:
             raise UnauthorizedManagerError("Manager PIN authorization required to void a bill!")
 
         order = self.repo.get_order_by_bill_number(bill_number)

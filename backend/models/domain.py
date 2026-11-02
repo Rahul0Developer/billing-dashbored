@@ -441,6 +441,7 @@ class ReturnRecord:
     cashier_id: str
     refund_amount: Decimal
     reason: str
+    authorized_by: str = ""  # user id of the manager/admin who approved the refund
     branch_id: str = "BR-DEL-01"
     created_at: datetime = field(default_factory=datetime.now)
 

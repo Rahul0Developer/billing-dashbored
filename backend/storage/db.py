@@ -186,6 +186,7 @@ CREATE TABLE IF NOT EXISTS returns (
     cashier_id TEXT NOT NULL,
     refund_amount TEXT NOT NULL,
     reason TEXT NOT NULL,
+    authorized_by TEXT NOT NULL DEFAULT '',
     branch_id TEXT NOT NULL DEFAULT 'BR-DEL-01',
     created_at TEXT NOT NULL,
     FOREIGN KEY(original_bill_number) REFERENCES orders(bill_number) ON DELETE RESTRICT
@@ -359,6 +360,8 @@ class DatabaseManager:
             ret_cols = [r[1] for r in cursor.execute("PRAGMA table_info(returns);").fetchall()]
             if "branch_id" not in ret_cols:
                 cursor.execute("ALTER TABLE returns ADD COLUMN branch_id TEXT NOT NULL DEFAULT 'BR-DEL-01';")
+            if "authorized_by" not in ret_cols:
+                cursor.execute("ALTER TABLE returns ADD COLUMN authorized_by TEXT NOT NULL DEFAULT '';")
 
             # cash_shifts table branch migrations
             shift_cols = [r[1] for r in cursor.execute("PRAGMA table_info(cash_shifts);").fetchall()]
