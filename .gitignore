@@ -4,5 +4,7 @@ __pycache__/
 node_modules/
 data/*.db
 data/*.db-*
+data/invoices/
+data/receipts/
 tests/__pycache__/
 backend/**/__pycache__/
