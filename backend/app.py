@@ -1152,7 +1152,7 @@ def transfer_inventory_between_branches(req: InterBranchTransferRequest, actor: 
             barcode=req.barcode,
             quantity=req.quantity,
             reason=req.reason,
-            user_id=req.user_id,
+            user_id=actor.id,  # authenticated operator — never client-supplied
         )
     except Exception as e:
         raise _safe_http_error(e, "Request could not be processed due to a server-side validation error.")
@@ -1174,19 +1174,28 @@ def get_store_users(actor: User = Depends(require_manager)):
 
 
 @app.post("/api/auth/verify-pin")
-def verify_manager_pin(req: VerifyPinRequest, actor: User = Depends(get_current_user)):
+def verify_manager_pin(req: VerifyPinRequest, actor: User = Depends(require_manager)):
     """Verify a staff member's PIN against HASHED credentials only.
 
     SECURITY: There is deliberately NO hardcoded universal override PIN.
     A match must come from a real, active provisioned user whose stored
     credential passes constant-time hash verification, and whose role is
-    within the caller-declared allowed_roles set. The requesting session
-    must itself be an authenticated supervisor-or-above operator.
+    within the caller-declared allowed_roles set.
+
+    PRIVILEGE-ESCALATION HARDENING: this endpoint is restricted to
+    supervisor-or-above sessions (require_manager). A cashier session may
+    never use it to discover/validate manager or admin PINs. Additionally,
+    an operator may not "verify" their own PIN — overrides must come from a
+    second person of appropriate authority — and every attempt (success or
+    failure) is written to the immutable stock-movement audit trail.
     """
     users = repo.list_users()
     matched = None
     for u in users:
         if not u.is_active:
+            continue
+        # Never let an operator validate their own credential through this path.
+        if u.id == actor.id:
             continue
         ok, new_hash = u.verify_and_upgrade_pin(req.pin)
         if ok:
@@ -1196,11 +1205,42 @@ def verify_manager_pin(req: VerifyPinRequest, actor: User = Depends(get_current_
                 matched = u
                 break
 
+    _audit_pin_event(actor, matched, req)
+
     if matched:
         logger.info("PIN override authorized by %s for user %s (%s)", actor.username, matched.username, matched.role.value)
         return {"valid": True, "role": matched.role.value, "name": matched.full_name}
 
     return {"valid": False, "role": None, "name": None}
+
+
+def _audit_pin_event(actor: User, matched: Optional[User], req: VerifyPinRequest) -> None:
+    """Write an immutable audit record for every manager-PIN override attempt."""
+    try:
+        import uuid as _uuid
+        from datetime import datetime as _dt
+        from backend.models.domain import StockMovement, StockMovementType
+
+        repo.record_stock_movement(StockMovement(
+            id=f"AUDIT-{_uuid.uuid4().hex[:12].upper()}",
+            barcode="SYSTEM-AUTH",
+            movement_type=StockMovementType.MANUAL_CORRECTION,
+            quantity_change=0,
+            previous_stock=0,
+            new_stock=0,
+            reason=(
+                f"PIN_OVERRIDE {'GRANTED' if matched else 'DENIED'}: "
+                f"actor={actor.username}({actor.role.value}) "
+                f"matched={'yes:' + matched.username if matched else 'no'} "
+                f"allowed_roles={req.allowed_roles}"
+            ),
+            reference_id="AUTH-AUDIT",
+            branch_id=actor.branch_id or "BR-DEL-01",
+            user_id=actor.id,
+            timestamp=_dt.now(),
+        ))
+    except Exception:  # auditing must never break the auth flow
+        logger.exception("Failed to write PIN override audit record")
 
 
 # --- CSV EXPORT REPORTS ---

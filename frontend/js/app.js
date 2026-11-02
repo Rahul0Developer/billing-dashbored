@@ -54,8 +54,8 @@ async function apiFetch(url, options = {}) {
   const headers = Object.assign({}, options.headers || {});
   if (authSession.token) headers["Authorization"] = "Bearer " + authSession.token;
   if (options.body && !headers["Content-Type"]) headers["Content-Type"] = "application/json";
-  const res = await apiFetch(url, Object.assign({}, options, { headers, credentials: "same-origin" }));
-  if (res.status === 401) { showLoginOverlay(); }
+  const res = await fetch(url, Object.assign({}, options, { headers, credentials: "same-origin" }));
+  if (res.status === 401) { authSession.clear(); showLoginOverlay(); }
   return res;
 }
 
@@ -174,13 +174,35 @@ function initClock() {
 
 // --- ACTIVE USER SELECTOR ---
 function initUserSelector() {
+  // SECURITY: operator identity is fixed by the authenticated session token.
+  // The old free-switching dropdown allowed cashier spoofing and is removed.
   const userSelect = document.getElementById("active-user-select");
-  userSelect.addEventListener("change", (e) => {
-    const [id, name, role] = e.target.value.split("|");
-    state.activeUser = { id, name, role };
-    showToast(`Cashier switched to ${name} (${role})`, "info");
-    loadShiftStatus();
-  });
+  if (!userSelect) return;
+  const wrapper = userSelect.parentElement;
+  if (authSession.user) {
+    const u = authSession.user;
+    state.activeUser = { id: u.id, name: u.name, role: u.role };
+    userSelect.innerHTML = `<option>${escHtml(u.name)} (${escHtml(u.role)})</option>`;
+    userSelect.disabled = true;
+    userSelect.style.pointerEvents = "none";
+    // Logout button
+    if (!document.getElementById("logout-btn")) {
+      const btn = document.createElement("button");
+      btn.id = "logout-btn";
+      btn.type = "button";
+      btn.textContent = "Logout";
+      btn.title = "End this POS session";
+      btn.style.cssText = "margin-left:8px;padding:6px 12px;border:1px solid #cbd5e1;border-radius:8px;background:#fff;color:#334155;font-weight:600;cursor:pointer;font-size:12px;";
+      btn.onclick = async () => {
+        try { await apiFetch("/api/auth/logout", { method: "POST" }); } catch (e) { /* ignore */ }
+        authSession.clear();
+        location.reload();
+      };
+      wrapper.appendChild(btn);
+    }
+  } else {
+    showLoginOverlay();
+  }
 }
 
 // --- SIDEBAR NAVIGATION ---
