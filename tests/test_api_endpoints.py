@@ -14,6 +14,29 @@ class TestRetailStoreAPI(unittest.TestCase):
     def setUpClass(cls):
         cls.client = TestClient(app)
 
+        # SECURITY: every mutating / PII endpoint now requires a real session.
+        # Log in with the provisioned (hashed-PIN) manager account and attach
+        # the bearer token to all subsequent requests.
+        login = cls.client.post("/api/auth/login", json={"username": "vmalhotra", "pin": "2222"})
+        assert login.status_code == 200, f"Test login failed: {login.text}"
+        token = login.json()["token"]
+        cls.client.headers.update({"Authorization": f"Bearer {token}"})
+
+    def test_unauthenticated_requests_are_rejected(self):
+        """Mutating and PII endpoints must return 401 without a session."""
+        bare = TestClient(app)
+        self.assertEqual(bare.get("/api/customers").status_code, 401)
+        self.assertEqual(
+            bare.post("/api/pos/checkout", json={
+                "items": [{"barcode": "8901030889211", "quantity": 1}],
+                "payment_method": "CASH", "tendered_amount": 500.0,
+            }).status_code,
+            401,
+        )
+        # Public endpoints remain open.
+        self.assertEqual(bare.get("/api/health").status_code, 200)
+        self.assertEqual(bare.get("/api/products/search?q=Atta").status_code, 200)
+
     def test_health_check(self):
         res = self.client.get("/api/health")
         self.assertEqual(res.status_code, 200)
@@ -44,9 +67,9 @@ class TestRetailStoreAPI(unittest.TestCase):
         self.assertIn("total_tax", data)
 
     def test_insufficient_stock_error_handling(self):
-        # Request unrealistic quantity of 99999 units
+        # Request an unrealistic quantity (within input bounds, above stock)
         payload = {
-            "items": [{"barcode": "8901030889211", "quantity": 99999}],
+            "items": [{"barcode": "8901030889211", "quantity": 999}],
             "payment_method": "CASH",
             "tendered_amount": 50000000.0,
             "cashier_id": "CASHIER-01"
@@ -56,6 +79,16 @@ class TestRetailStoreAPI(unittest.TestCase):
         err = res.json()
         self.assertEqual(err["code"], "INSUFFICIENT_STOCK")
         self.assertIn("Insufficient stock", err["error"])
+
+    def test_quantity_input_bounds_enforced(self):
+        """Out-of-range quantities are rejected at the validation layer (422)."""
+        payload = {
+            "items": [{"barcode": "8901030889211", "quantity": 99999}],
+            "payment_method": "CASH",
+            "tendered_amount": 50000000.0,
+        }
+        res = self.client.post("/api/pos/checkout", json=payload)
+        self.assertEqual(res.status_code, 422)
 
     def test_pos_checkout_return_and_dashboard_flow(self):
         # 1. Successful Checkout

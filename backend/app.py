@@ -5,17 +5,27 @@ expense management, customer footfall tracking, shifts, returns, and inventory.
 """
 
 import csv
+from collections import deque
 from datetime import date, datetime
 from decimal import Decimal
+import html as html_lib
 import io
+import logging
+import os
+import re
+import threading
+import time
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
-from fastapi import FastAPI, HTTPException, Query, Response, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Response, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, PlainTextResponse, HTMLResponse, JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
+
+from backend import security
+from backend.models.domain import User, UserRole
 
 from backend.config import STORE_PROFILE, DATABASE_PATH, BASE_DIR
 from backend.models.domain import CustomerTier, PaymentMethod, ExpenseCategory, Product, UserRole, round_curr
@@ -50,13 +60,139 @@ app = FastAPI(
     version="3.0"
 )
 
+# ---------------------------------------------------------------------------
+# CORS: locked down to an explicit, configurable origin allow-list.
+# Wildcard "*" with credentials is forbidden; override via POS_ALLOWED_ORIGINS
+# (comma-separated) for production deployments behind a known domain.
+# ---------------------------------------------------------------------------
+_default_origins = "http://localhost:8000,http://127.0.0.1:8000,http://localhost:3000"
+ALLOWED_ORIGINS = [o.strip() for o in os.environ.get("POS_ALLOWED_ORIGINS", _default_origins).split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "DELETE"],
+    allow_headers=["Content-Type", "Authorization"],
 )
+
+
+# ---------------------------------------------------------------------------
+# SECURITY HEADERS + RATE LIMITING MIDDLEWARE
+# ---------------------------------------------------------------------------
+class SlidingWindowRateLimiter:
+    """In-memory per-client sliding-window limiter (no external deps)."""
+
+    def __init__(self, capacity_per_minute: int = 600) -> None:
+        self.capacity = capacity_per_minute
+        self._lock = threading.Lock()
+        self._hits: Dict[str, deque] = {}
+
+    def allow(self, identity: str) -> bool:
+        now = time.monotonic()
+        with self._lock:
+            bucket = self._hits.setdefault(identity, deque())
+            while bucket and now - bucket[0] > 60.0:
+                bucket.popleft()
+            if len(bucket) >= self.capacity:
+                return False
+            bucket.append(now)
+            return True
+
+
+rate_limiter = SlidingWindowRateLimiter(
+    capacity_per_minute=int(os.environ.get("POS_RATE_LIMIT_PER_MINUTE", "600"))
+)
+AUTH_RATE_LIMITER = SlidingWindowRateLimiter(capacity_per_minute=10)
+
+
+@app.middleware("http")
+async def security_middleware(request: Request, call_next):
+    client_ip = request.client.host if request.client else "unknown"
+
+    # Tighter budget for credential endpoints (login / manager PIN checks).
+    if request.url.path in ("/api/auth/login", "/api/auth/verify-pin"):
+        if not AUTH_RATE_LIMITER.allow(client_ip):
+            return JSONResponse(status_code=429, content={"detail": "Too many authentication attempts. Please wait a minute."})
+    elif not rate_limiter.allow(client_ip):
+        return JSONResponse(status_code=429, content={"detail": "Rate limit exceeded. Slow down requests."})
+
+    response = await call_next(request)
+    # Defense-in-depth headers for the embedded SPA and invoice HTML.
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "same-origin"
+    response.headers["Permissions-Policy"] = "camera=(self), geolocation=(), microphone=()"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; "
+        "style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; font-src 'self' https://cdnjs.cloudflare.com data:; "
+        "img-src 'self' data: https:; connect-src 'self'"
+    )
+    return response
+
+
+# ---------------------------------------------------------------------------
+# AUTH DEPENDENCIES (signed session tokens + role-based access control)
+# ---------------------------------------------------------------------------
+def _extract_token(request: Request) -> Optional[str]:
+    header = request.headers.get("Authorization", "")
+    if header.lower().startswith("bearer "):
+        return header[7:].strip()
+    return request.cookies.get("pos_session") or None
+
+
+def get_current_user(request: Request) -> User:
+    """Mandatory authentication for every mutating and PII-bearing endpoint."""
+    payload = security.decode_token(_extract_token(request) or "")
+    if not payload:
+        raise HTTPException(status_code=401, detail="Authentication required. Please log in.")
+    # `repo` is initialized at module scope below; resolved lazily at request time.
+    user = _repository_ref().get_user_by_id(payload.get("uid", ""))
+    if not user or not user.is_active:
+        raise HTTPException(status_code=401, detail="Session user no longer exists or is disabled.")
+    return user
+
+
+def _repository_ref():
+    from backend import app as _self  # late binding to the module-level repo
+    return _self.repo
+
+
+def require_roles(*roles: UserRole):
+    allowed = {r.value for r in roles}
+
+    def dependency(user: User = Depends(get_current_user)) -> User:
+        if user.role.value not in allowed:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Insufficient privileges. Requires one of: {', '.join(sorted(allowed))}.",
+            )
+        return user
+
+    return dependency
+
+
+require_manager = require_roles(UserRole.ADMIN, UserRole.STORE_MANAGER)
+require_staff = require_roles(UserRole.ADMIN, UserRole.STORE_MANAGER, UserRole.CASHIER, UserRole.INVENTORY_MANAGER)
+require_inventory = require_roles(UserRole.ADMIN, UserRole.STORE_MANAGER, UserRole.INVENTORY_MANAGER)
+
+
+class LoginRequest(BaseModel):
+    username: str = Field(..., min_length=1, max_length=64)
+    pin: str = Field(..., min_length=3, max_length=8)
+
+
+class UserCreateRequest(BaseModel):
+    username: str = Field(..., min_length=3, max_length=64, pattern=r"^[A-Za-z0-9._-]+$")
+    full_name: str = Field(..., min_length=1, max_length=120)
+    role: str = Field(..., description="One of UserRole values (CASHIER, SUPERVISOR, STORE_MANAGER, ACCOUNTANT, ADMIN)")
+    pin: str = Field(..., min_length=4, max_length=8)
+    branch_id: str = Field(default="BR-DEL-01", max_length=32)
+
+
+class UserStatusRequest(BaseModel):
+    is_active: bool
+
 
 # Global Exception Handlers for POS Transaction Engine
 @app.exception_handler(InsufficientStockError)
@@ -118,141 +254,253 @@ register_service = RegisterShiftService(repo)
 inventory_service = InventoryService(repo, inventory_pq, search_engine)
 
 
+# ---------------------------------------------------------------------------
+# SECURITY: Seed real provisioned staff accounts with HASHED PINs.
+# There are NO hardcoded universal override PINs anywhere in this app.
+# Demo credentials below exist only so the UI is usable out of the box;
+# change them immediately in production via /api/auth/users provisioning.
+# ---------------------------------------------------------------------------
+_SEEDED_STAFF = [
+    ("ADMIN-01", "admin", "Super Admin", UserRole.ADMIN, "9999", "BR-DEL-01"),
+    ("MGR-01", "vmalhotra", "Vikram Malhotra", UserRole.STORE_MANAGER, "2222", "BR-DEL-01"),
+    ("CASHIER-01", "rsharma", "Rajesh Sharma", UserRole.CASHIER, "1111", "BR-DEL-01"),
+    ("CASHIER-02", "ppatel", "Priya Patel", UserRole.CASHIER, "1212", "BR-DEL-01"),
+]
+
+
+def seed_default_staff() -> None:
+    for uid, username, full_name, role, raw_pin, branch_id in _SEEDED_STAFF:
+        if repo.get_user_by_id(uid):
+            continue
+        repo.save_user(
+            User(
+                id=uid,
+                username=username,
+                full_name=full_name,
+                role=role,
+                pin=security.hash_credential(raw_pin),  # stored ONLY as bcrypt/PBKDF2 hash
+                branch_id=branch_id,
+                is_active=True,
+            )
+        )
+
+
+seed_default_staff()
+
+logger = logging.getLogger("apex.pos")
+
+
+def _safe_http_error(exc: Exception, fallback_detail: str) -> "HTTPException":
+    """Return a client-safe error message; log internals server-side only."""
+    from backend.models.exceptions import POSTransactionError
+
+    if isinstance(exc, POSTransactionError):
+        return HTTPException(status_code=400, detail=exc.message)
+    if isinstance(exc, (ValueError, LookupError)):
+        logger.warning("Rejected request: %s", exc, exc_info=True)
+        return HTTPException(status_code=400, detail=str(exc)[:300])
+    logger.error("Unhandled service error: %s", exc, exc_info=True)
+    return HTTPException(status_code=400, detail=fallback_detail)
+
+
 # ============================================================================
 # PYDANTIC SCHEMAS
 # ============================================================================
 class CartItemInput(BaseModel):
-    barcode: str
-    quantity: int = 1
+    barcode: str = Field(..., min_length=3, max_length=64)
+    quantity: int = Field(1, ge=1, le=1000)
 
 
 class CartCalculationRequest(BaseModel):
-    items: List[CartItemInput]
-    customer_phone: Optional[str] = None
-    points_to_redeem: int = 0
-    branch_id: str = "BR-DEL-01"
+    items: List[CartItemInput] = Field(..., min_length=1, max_length=200)
+    customer_phone: Optional[str] = Field(None, max_length=32)
+    points_to_redeem: int = Field(0, ge=0, le=1_000_000)
+    branch_id: str = Field("BR-DEL-01", max_length=32)
 
 
 class CheckoutRequest(BaseModel):
-    items: List[CartItemInput]
-    payment_method: str = "CASH"
-    tendered_amount: float
-    cashier_id: str = "CASHIER-01"
-    cashier_name: str = "Rajesh Sharma"
-    customer_phone: Optional[str] = None
-    customer_name: Optional[str] = None
-    points_to_redeem: int = 0
-    branch_id: str = "BR-DEL-01"
-    split_payments: Optional[List[Dict[str, Any]]] = None
+    items: List[CartItemInput] = Field(..., min_length=1, max_length=200)
+    payment_method: str = Field("CASH", max_length=32)
+    tendered_amount: float = Field(..., ge=0, le=100_000_000)
+    cashier_id: str = Field("CASHIER-01", max_length=32)
+    cashier_name: str = Field("Rajesh Sharma", max_length=80)
+    customer_phone: Optional[str] = Field(None, max_length=32)
+    customer_name: Optional[str] = Field(None, max_length=80)
+    points_to_redeem: int = Field(0, ge=0, le=1_000_000)
+    branch_id: str = Field("BR-DEL-01", max_length=32)
+    split_payments: Optional[List[Dict[str, Any]]] = Field(None, max_length=10)
+
+    @field_validator("payment_method")
+    @classmethod
+    def _valid_payment_method(cls, v: str) -> str:
+        allowed = {m.value for m in PaymentMethod}
+        uv = v.strip().upper()
+        if uv not in allowed:
+            raise ValueError(f"Unsupported payment method '{v}'.")
+        return uv
 
 
 class ExpenseCreateRequest(BaseModel):
-    category: str
-    amount: float
-    description: str
-    expense_date: Optional[str] = None
-    payment_mode: str = "BANK_TRANSFER"
-    vendor_name: str = ""
-    receipt_reference: str = ""
-    branch_id: str = "BR-DEL-01"
+    category: str = Field(..., min_length=2, max_length=40)
+    amount: float = Field(..., gt=0, le=100_000_000)
+    description: str = Field(..., min_length=1, max_length=500)
+    expense_date: Optional[str] = Field(None, max_length=32)
+    payment_mode: str = Field("BANK_TRANSFER", max_length=40)
+    vendor_name: str = Field("", max_length=120)
+    receipt_reference: str = Field("", max_length=80)
+    branch_id: str = Field("BR-DEL-01", max_length=32)
 
 
 class ProductCreateRequest(BaseModel):
-    barcode: str
-    sku: str
-    name: str
-    category: str
-    brand: str
-    unit: str = "pcs"
-    cost_price: float
-    selling_price: float
-    mrp: float
-    stock_quantity: int
-    reorder_level: int = 10
-    tax_rate_percent: float = 5.0
+    barcode: str = Field(..., min_length=3, max_length=64)
+    sku: str = Field(..., min_length=1, max_length=64)
+    name: str = Field(..., min_length=1, max_length=200)
+    category: str = Field(..., min_length=1, max_length=80)
+    brand: str = Field(..., min_length=1, max_length=80)
+    unit: str = Field("pcs", min_length=1, max_length=16)
+    cost_price: float = Field(..., ge=0, le=10_000_000)
+    selling_price: float = Field(..., ge=0, le=10_000_000)
+    mrp: float = Field(..., ge=0, le=10_000_000)
+    stock_quantity: int = Field(..., ge=0, le=1_000_000)
+    reorder_level: int = Field(10, ge=0, le=100_000)
+    tax_rate_percent: float = Field(5.0, ge=0, le=100)
 
 
 class ReturnItemInput(BaseModel):
-    barcode: str
-    quantity: int = 1
+    barcode: str = Field(..., min_length=3, max_length=64)
+    quantity: int = Field(1, ge=1, le=1000)
 
 
 class ProcessReturnRequest(BaseModel):
-    bill_number: str
-    items: List[ReturnItemInput]
-    manager_pin: str
-    cashier_id: str = "CASHIER-01"
-    reason: str = "Customer Return / Exchange"
+    bill_number: str = Field(..., min_length=3, max_length=64)
+    items: List[ReturnItemInput] = Field(..., min_length=1, max_length=200)
+    manager_pin: str = Field(..., min_length=3, max_length=8)
+    cashier_id: str = Field("CASHIER-01", max_length=32)
+    reason: str = Field("Customer Return / Exchange", max_length=300)
 
 
 class VoidOrderRequest(BaseModel):
-    manager_pin: str
-    reason: str = "Cashier Void / Order Cancelled"
+    manager_pin: str = Field(..., min_length=3, max_length=8)
+    reason: str = Field("Cashier Void / Order Cancelled", max_length=300)
 
 
 class StartShiftRequest(BaseModel):
-    cashier_id: str = "CASHIER-01"
-    cashier_name: str = "Rajesh Sharma"
-    opening_float: float = 2000.0
-    notes: str = "Shift Opened"
-    branch_id: str = "BR-DEL-01"
+    cashier_id: str = Field("CASHIER-01", max_length=32)
+    cashier_name: str = Field("Rajesh Sharma", max_length=80)
+    opening_float: float = Field(2000.0, ge=0, le=1_000_000)
+    notes: str = Field("Shift Opened", max_length=300)
+    branch_id: str = Field("BR-DEL-01", max_length=32)
 
 
 class CashDropRequest(BaseModel):
-    cashier_id: str = "CASHIER-01"
-    amount: float
-    reason: str = "Midday Safe Drop"
+    cashier_id: str = Field("CASHIER-01", max_length=32)
+    amount: float = Field(..., gt=0, le=10_000_000)
+    reason: str = Field("Midday Safe Drop", max_length=300)
 
 
 class CloseShiftRequest(BaseModel):
-    cashier_id: str = "CASHIER-01"
-    closing_counted_cash: float
-    notes: str = "End of Day Register Close"
+    cashier_id: str = Field("CASHIER-01", max_length=32)
+    closing_counted_cash: float = Field(..., ge=0, le=100_000_000)
+    notes: str = Field("End of Day Register Close", max_length=300)
 
 
 class StockAdjustmentRequest(BaseModel):
-    barcode: str
-    new_quantity: int
-    reason_type: str = "DISCREPANCY"
-    notes: str = ""
-    branch_id: str = "BR-DEL-01"
+    barcode: str = Field(..., min_length=3, max_length=64)
+    new_quantity: int = Field(..., ge=0, le=1_000_000)
+    reason_type: str = Field("DISCREPANCY", max_length=40)
+    notes: str = Field("", max_length=300)
+    branch_id: str = Field("BR-DEL-01", max_length=32)
 
 
 class BranchCreateRequest(BaseModel):
-    code: str
-    name: str
-    address: str
-    city: str
-    state: str = "Delhi NCR"
-    pincode: str = "201014"
-    phone: str = ""
-    email: str = ""
-    gstin: str = ""
-    manager_name: str = ""
+    code: str = Field(..., min_length=2, max_length=16)
+    name: str = Field(..., min_length=2, max_length=120)
+    address: str = Field(..., min_length=2, max_length=200)
+    city: str = Field(..., min_length=1, max_length=80)
+    state: str = Field("Delhi NCR", max_length=80)
+    pincode: str = Field("201014", min_length=4, max_length=10)
+    phone: str = Field("", max_length=30)
+    email: str = Field("", max_length=120)
+    gstin: str = Field("", max_length=20)
+    manager_name: str = Field("", max_length=80)
     is_headquarters: bool = False
 
 
 class InterBranchTransferRequest(BaseModel):
-    from_branch_id: str
-    to_branch_id: str
-    barcode: str
-    quantity: int
-    reason: str = "Stock rebalancing"
-    user_id: str = "STORE_MANAGER"
+    from_branch_id: str = Field(..., min_length=2, max_length=32)
+    to_branch_id: str = Field(..., min_length=2, max_length=32)
+    barcode: str = Field(..., min_length=3, max_length=64)
+    quantity: int = Field(..., ge=1, le=100_000)
+    reason: str = Field("Stock rebalancing", max_length=300)
 
 
 class BulkCSVImportRequest(BaseModel):
-    csv_content: str
+    csv_content: str = Field(..., min_length=1, max_length=250_000)
+
+    @field_validator("csv_content")
+    @classmethod
+    def _limit_rows(cls, v: str) -> str:
+        row_count = v.count("\n") + 1
+        if row_count > 2000:
+            raise ValueError("CSV import is limited to 2000 rows per request.")
+        return v
 
 
 class VerifyPinRequest(BaseModel):
-    pin: str
-    allowed_roles: Optional[List[str]] = None
+    pin: str = Field(..., min_length=3, max_length=8)
+    allowed_roles: Optional[List[str]] = Field(None, max_length=8)
 
 
 # ============================================================================
 # API ROUTES
 # ============================================================================
+
+# --- AUTHENTICATION (session token issuance) ---
+@app.post("/api/auth/login")
+def login(req: LoginRequest):
+    identity = f"login:{req.username.lower().strip()}"
+    if security.login_lockouts.is_locked(identity):
+        raise HTTPException(status_code=423, detail="Account temporarily locked after repeated failed attempts. Try again in 15 minutes.")
+
+    user = repo.get_user_by_username(req.username.strip())
+    ok, new_hash = (False, None)
+    if user and user.is_active:
+        ok, new_hash = user.verify_and_upgrade_pin(req.pin)
+        if ok and new_hash:
+            repo.upgrade_user_pin_hash(user.id, user.pin)
+
+    if not ok:
+        security.login_lockouts.register_failure(identity)
+        # Uniform message: never disclose whether the username exists.
+        raise HTTPException(status_code=401, detail="Invalid credentials.")
+
+    security.login_lockouts.reset(identity)
+    token = security.create_token({"uid": user.id, "role": user.role.value})
+    response = JSONResponse(
+        content={
+            "success": True,
+            "token": token,
+            "user": {
+                "id": user.id,
+                "username": user.username,
+                "name": user.full_name,
+                "role": user.role.value,
+                "branch_id": user.branch_id,
+            },
+        }
+    )
+    response.set_cookie(
+        "pos_session", token, httponly=True, samesite="lax", max_age=8 * 3600, secure=bool(os.environ.get("POS_COOKIE_SECURE"))
+    )
+    return response
+
+
+@app.post("/api/auth/logout")
+def logout():
+    response = JSONResponse(content={"success": True})
+    response.delete_cookie("pos_session")
+    return response
+
 
 @app.get("/api/health")
 def health_check():
@@ -312,7 +560,7 @@ def list_all_products():
 
 
 @app.post("/api/products")
-def create_or_update_product(req: ProductCreateRequest):
+def create_or_update_product(req: ProductCreateRequest, actor: User = Depends(require_staff)):
     prod = Product(
         barcode=req.barcode,
         sku=req.sku,
@@ -330,12 +578,13 @@ def create_or_update_product(req: ProductCreateRequest):
     repo.save_product(prod)
     search_engine.index_product(prod)
     inventory_pq.push(prod)
+    repo.record_audit_log(actor.id, "PRODUCT_UPSERT", "PRODUCT", prod.barcode, f"price={prod.selling_price} stock={prod.stock_quantity}")
     return {"success": True, "barcode": prod.barcode, "message": "Product saved successfully"}
 
 
 # --- CUSTOMER TRACKING & FOOTFALL INTELLIGENCE ---
 @app.get("/api/customers/recognize")
-def smart_recognize_customer(identifier: str = Query(..., description="Customer mobile number or membership QR code")):
+def smart_recognize_customer(identifier: str = Query(..., description="Customer mobile number or membership QR code"), actor: User = Depends(require_staff)):
     """
     Smart Customer Recognition:
     Instantly identifies returning customers using their phone number or membership QR code,
@@ -353,7 +602,7 @@ def smart_recognize_customer(identifier: str = Query(..., description="Customer 
 
 
 @app.get("/api/customers/lookup")
-def lookup_customer(phone: str = Query(..., description="Customer mobile number or membership code")):
+def lookup_customer(phone: str = Query(..., description="Customer mobile number or membership code"), actor: User = Depends(require_staff)):
     data = customer_service.smart_recognize_customer(phone)
     if not data:
         return {"exists": False, "phone": phone}
@@ -378,17 +627,17 @@ def lookup_customer(phone: str = Query(..., description="Customer mobile number 
 
 
 @app.get("/api/customers")
-def list_customers():
+def list_customers(actor: User = Depends(require_staff)):
     return customer_service.list_top_frequent_customers(limit=100)
 
 
 @app.get("/api/customers/top")
-def get_top_customers(limit: int = 20):
+def get_top_customers(limit: int = 20, actor: User = Depends(require_staff)):
     return {"top_customers": customer_service.list_top_frequent_customers(limit=limit)}
 
 
 @app.get("/api/customers/{identifier}/insights")
-def get_customer_insights(identifier: str):
+def get_customer_insights(identifier: str, actor: User = Depends(require_staff)):
     """Deep shopping insights: category preferences, favorite products, and past order history."""
     cust = customer_service.lookup_customer(identifier)
     if not cust:
@@ -397,7 +646,7 @@ def get_customer_insights(identifier: str):
 
 
 @app.get("/api/customers/{phone}/history")
-def get_customer_history(phone: str):
+def get_customer_history(phone: str, actor: User = Depends(require_staff)):
     orders = repo.list_orders_by_customer(phone)
     return [
         {
@@ -426,7 +675,7 @@ def get_customer_history(phone: str):
 
 # --- POINT OF SALE CHECKOUT ---
 @app.post("/api/pos/calculate")
-def calculate_cart(req: CartCalculationRequest):
+def calculate_cart(req: CartCalculationRequest, actor: User = Depends(require_staff)):
     # Resolve customer phone if membership code or QR was provided
     resolved_phone = req.customer_phone
     if resolved_phone:
@@ -444,7 +693,7 @@ def calculate_cart(req: CartCalculationRequest):
 
 
 @app.post("/api/pos/checkout")
-def checkout_sale(req: CheckoutRequest):
+def checkout_sale(req: CheckoutRequest, actor: User = Depends(require_staff)):
     # Resolve customer phone if membership code or QR was provided
     resolved_phone = req.customer_phone
     resolved_name = req.customer_name
@@ -471,7 +720,7 @@ def checkout_sale(req: CheckoutRequest):
 
 
 @app.get("/api/orders")
-def list_recent_orders(branch_id: Optional[str] = Query(None)):
+def list_recent_orders(branch_id: Optional[str] = Query(None), actor: User = Depends(require_staff)):
     target_branch = None if (not branch_id or branch_id.upper() == "ALL") else branch_id.strip()
     orders = repo.list_orders(limit=60, branch_id=target_branch)
     return [
@@ -493,7 +742,7 @@ def list_recent_orders(branch_id: Optional[str] = Query(None)):
 
 
 @app.get("/api/orders/{bill_number}")
-def get_order_details(bill_number: str):
+def get_order_details(bill_number: str, actor: User = Depends(require_staff)):
     order = repo.get_order_by_bill_number(bill_number)
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
@@ -537,7 +786,7 @@ def get_order_details(bill_number: str):
 
 
 @app.get("/api/orders/{bill_number}/thermal")
-def get_thermal_receipt(bill_number: str):
+def get_thermal_receipt(bill_number: str, actor: User = Depends(require_staff)):
     order = repo.get_order_by_bill_number(bill_number)
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
@@ -547,7 +796,7 @@ def get_thermal_receipt(bill_number: str):
 
 
 @app.get("/api/orders/{bill_number}/a4")
-def get_a4_tax_invoice(bill_number: str):
+def get_a4_tax_invoice(bill_number: str, actor: User = Depends(require_staff)):
     order = repo.get_order_by_bill_number(bill_number)
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
@@ -557,25 +806,32 @@ def get_a4_tax_invoice(bill_number: str):
 
 
 @app.post("/api/orders/{bill_number}/void")
-def void_bill(bill_number: str, req: VoidOrderRequest):
-    return pos_service.void_order(bill_number, req.manager_pin, req.reason)
+def void_bill(bill_number: str, req: VoidOrderRequest, actor: User = Depends(require_manager)):
+    result = pos_service.void_order(bill_number, req.manager_pin, req.reason)
+    repo.record_audit_log(actor.id, "BILL_VOID", "ORDER", bill_number, f"reason={req.reason}")
+    return result
 
 
 # --- RETURNS & REFUNDS ---
 @app.post("/api/returns/process")
-def process_customer_return(req: ProcessReturnRequest):
+def process_customer_return(req: ProcessReturnRequest, actor: User = Depends(require_manager)):
     items = [{"barcode": i.barcode, "quantity": i.quantity} for i in req.items]
-    return returns_service.process_return(
+    result = returns_service.process_return(
         bill_number=req.bill_number,
         items_to_return=items,
         manager_pin=req.manager_pin,
         cashier_id=req.cashier_id,
         reason=req.reason
     )
+    repo.record_audit_log(
+        actor.id, "RETURN_PROCESSED", "ORDER", req.bill_number,
+        f"refund={result.get('refund_amount') if isinstance(result, dict) else ''} reason={req.reason}"
+    )
+    return result
 
 
 @app.get("/api/returns")
-def list_returns(branch_id: Optional[str] = Query(None)):
+def list_returns(branch_id: Optional[str] = Query(None), actor: User = Depends(require_staff)):
     target_branch = None if (not branch_id or branch_id.upper() == "ALL") else branch_id.strip()
     returns = repo.list_returns(limit=50, branch_id=target_branch)
     return [
@@ -596,12 +852,12 @@ def list_returns(branch_id: Optional[str] = Query(None)):
 
 # --- CASH REGISTER & SHIFT MANAGEMENT (Z-REPORT) ---
 @app.get("/api/shifts/current")
-def get_current_shift(cashier_id: str = Query("CASHIER-01")):
+def get_current_shift(cashier_id: str = Query("CASHIER-01"), actor: User = Depends(require_staff)):
     return register_service.get_current_shift_status(cashier_id)
 
 
 @app.post("/api/shifts/start")
-def start_cashier_shift(req: StartShiftRequest):
+def start_cashier_shift(req: StartShiftRequest, actor: User = Depends(require_staff)):
     shift = register_service.start_shift(
         cashier_id=req.cashier_id,
         cashier_name=req.cashier_name,
@@ -620,7 +876,7 @@ def start_cashier_shift(req: StartShiftRequest):
 
 
 @app.post("/api/shifts/drop")
-def record_shift_cash_drop(req: CashDropRequest):
+def record_shift_cash_drop(req: CashDropRequest, actor: User = Depends(require_staff)):
     try:
         return register_service.record_cash_drop(
             cashier_id=req.cashier_id,
@@ -628,23 +884,25 @@ def record_shift_cash_drop(req: CashDropRequest):
             reason=req.reason
         )
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise _safe_http_error(e, "Request could not be processed due to a server-side validation error.")
 
 
 @app.post("/api/shifts/close")
-def close_shift_and_generate_z_report(req: CloseShiftRequest):
+def close_shift_and_generate_z_report(req: CloseShiftRequest, actor: User = Depends(require_manager)):
     try:
-        return register_service.close_shift_z_report(
+        result = register_service.close_shift_z_report(
             cashier_id=req.cashier_id,
             actual_counted_cash=req.closing_counted_cash,
             closing_notes=req.notes
         )
+        repo.record_audit_log(actor.id, "SHIFT_CLOSE", "CASH_SHIFT", req.cashier_id, f"notes={req.notes}")
+        return result
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise _safe_http_error(e, "Request could not be processed due to a server-side validation error.")
 
 
 @app.get("/api/shifts/history")
-def list_shift_history():
+def list_shift_history(actor: User = Depends(require_manager)):
     shifts = repo.list_shifts(limit=30)
     return [
         {
@@ -671,17 +929,22 @@ def list_shift_history():
 
 # --- INVENTORY & STOCK OPERATIONS ---
 @app.post("/api/inventory/adjust")
-def adjust_inventory_stock(req: StockAdjustmentRequest):
+def adjust_inventory_stock(req: StockAdjustmentRequest, actor: User = Depends(require_inventory)):
     try:
-        return inventory_service.adjust_stock(
+        result = inventory_service.adjust_stock(
             barcode=req.barcode,
             new_quantity=req.new_quantity,
             reason_type=req.reason_type,
             notes=req.notes,
             branch_id=req.branch_id,
         )
+        repo.record_audit_log(
+            actor.id, "STOCK_ADJUST", "PRODUCT", req.barcode,
+            f"new_qty={req.new_quantity} type={req.reason_type} notes={req.notes}"
+        )
+        return result
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise _safe_http_error(e, "Request could not be processed due to a server-side validation error.")
 
 
 @app.get("/api/inventory/valuation")
@@ -700,15 +963,15 @@ def export_catalog_csv():
 
 
 @app.post("/api/inventory/import-csv")
-def import_catalog_csv(req: BulkCSVImportRequest):
+def import_catalog_csv(req: BulkCSVImportRequest, actor: User = Depends(require_inventory)):
     try:
         return inventory_service.import_catalog_from_csv(req.csv_content)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise _safe_http_error(e, "Request could not be processed due to a server-side validation error.")
 
 
 @app.get("/api/inventory/movements")
-def list_stock_movements(limit: int = 50, branch_id: Optional[str] = Query(None)):
+def list_stock_movements(limit: int = 50, branch_id: Optional[str] = Query(None), actor: User = Depends(require_staff)):
     target_branch = None if (not branch_id or branch_id.upper() == "ALL") else branch_id.strip()
     movements = repo.list_stock_movements(limit=limit, branch_id=target_branch)
     return [
@@ -722,10 +985,16 @@ def list_stock_movements(limit: int = 50, branch_id: Optional[str] = Query(None)
             "reason": m.reason,
             "user_id": m.user_id,
             "branch_id": getattr(m, "branch_id", "BR-DEL-01"),
-            "date": m.created_at.strftime("%d-%b-%Y %I:%M %p")
+            "date": m.timestamp.strftime("%d-%b-%Y %I:%M %p")
         }
         for m in movements
     ]
+
+
+@app.get("/api/audit/logs")
+def list_audit_logs(limit: int = 100, actor: User = Depends(require_manager)):
+    """Security audit trail: PIN overrides, voids, returns, stock adjustments."""
+    return repo.list_audit_logs(limit=min(max(limit, 1), 500))
 
 
 @app.get("/api/inventory/barcode/{barcode}")
@@ -733,17 +1002,17 @@ def get_barcode_shelf_tag(barcode: str):
     try:
         return inventory_service.generate_shelf_barcode_tag(barcode)
     except Exception as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise _safe_http_error(e, "Request could not be processed due to a server-side validation error.")
 
 
 # --- EXPENSE TRACKING (WEEKLY, MONTHLY, YEARLY) ---
 @app.get("/api/expenses")
-def list_expenses(branch_id: Optional[str] = Query(None)):
+def list_expenses(branch_id: Optional[str] = Query(None), actor: User = Depends(require_staff)):
     return expense_service.list_expenses(limit=100, branch_id=branch_id)
 
 
 @app.get("/api/expenses/summary")
-def get_expenses_summary(branch_id: Optional[str] = Query(None)):
+def get_expenses_summary(branch_id: Optional[str] = Query(None), actor: User = Depends(require_staff)):
     data = expense_service.get_periodic_expense_summary(branch_id=branch_id)
     data["weekly_total"] = data["totals"]["weekly_expenses"]
     data["monthly_total"] = data["totals"]["monthly_expenses"]
@@ -753,7 +1022,7 @@ def get_expenses_summary(branch_id: Optional[str] = Query(None)):
 
 
 @app.post("/api/expenses")
-def create_expense(req: ExpenseCreateRequest):
+def create_expense(req: ExpenseCreateRequest, actor: User = Depends(require_manager)):
     exp = expense_service.add_expense(
         category=req.category,
         amount=req.amount,
@@ -768,7 +1037,7 @@ def create_expense(req: ExpenseCreateRequest):
 
 
 @app.delete("/api/expenses/{expense_id}")
-def delete_expense(expense_id: str):
+def delete_expense(expense_id: str, actor: User = Depends(require_manager)):
     success = expense_service.delete_expense(expense_id)
     if not success:
         raise HTTPException(status_code=404, detail="Expense not found")
@@ -777,7 +1046,7 @@ def delete_expense(expense_id: str):
 
 # --- STORE EXECUTIVE DASHBOARD & P&L ANALYTICS ---
 @app.get("/api/dashboard")
-def get_dashboard_data(branch_id: Optional[str] = Query(None)):
+def get_dashboard_data(branch_id: Optional[str] = Query(None), actor: User = Depends(require_staff)):
     metrics = analytics_service.get_dashboard_metrics(branch_id=branch_id)
     w = metrics.get("weekly", {})
     metrics["total_revenue"] = w.get("revenue", 0.0)
@@ -796,7 +1065,7 @@ def get_dashboard_data(branch_id: Optional[str] = Query(None)):
 
 
 @app.get("/api/analytics/business-intelligence")
-def get_business_intelligence(branch_id: Optional[str] = Query(None)):
+def get_business_intelligence(branch_id: Optional[str] = Query(None), actor: User = Depends(require_manager)):
     """
     Comprehensive Business Intelligence API:
     - Best-selling products (Volume, Revenue, Profit Margin %)
@@ -841,7 +1110,7 @@ def list_store_branches():
 
 
 @app.post("/api/branches")
-def create_store_branch(req: BranchCreateRequest):
+def create_store_branch(req: BranchCreateRequest, actor: User = Depends(require_manager)):
     """Registers a new physical store branch in the multi-branch network."""
     from backend.models.domain import StoreBranch
     clean_code = req.code.upper().strip()
@@ -908,7 +1177,7 @@ def get_branch_inventory(branch_id: str):
 
 
 @app.post("/api/inventory/transfer")
-def transfer_inventory_between_branches(req: InterBranchTransferRequest):
+def transfer_inventory_between_branches(req: InterBranchTransferRequest, actor: User = Depends(require_inventory)):
     try:
         return inventory_service.transfer_stock(
             from_branch_id=req.from_branch_id,
@@ -916,50 +1185,129 @@ def transfer_inventory_between_branches(req: InterBranchTransferRequest):
             barcode=req.barcode,
             quantity=req.quantity,
             reason=req.reason,
-            user_id=req.user_id,
+            user_id=actor.id,  # authenticated operator — never client-supplied
         )
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise _safe_http_error(e, "Request could not be processed due to a server-side validation error.")
 
 
 # --- USERS & AUTH ---
 @app.get("/api/auth/users")
-def get_store_users():
+def get_store_users(actor: User = Depends(require_manager)):
     users = repo.list_users()
     return [
         {
             "id": u.id,
             "username": u.username,
             "full_name": u.full_name,
-            "role": u.role.value
+            "role": u.role.value,
+            "branch_id": getattr(u, "branch_id", "BR-DEL-01"),
+            "is_active": u.is_active,
         }
         for u in users
     ]
 
 
+@app.post("/api/auth/users")
+def create_store_user(req: UserCreateRequest, actor: User = Depends(require_roles(UserRole.ADMIN))):
+    """Provision a new staff account. PIN is hashed before storage — never plaintext."""
+    try:
+        role = UserRole(req.role.upper())
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"Unknown role '{req.role}'.")
+    if repo.get_user_by_username(req.username.strip()):
+        raise HTTPException(status_code=409, detail="Username already exists.")
+    import uuid as _uuid
+    from datetime import datetime as _dt
+    user = User(
+        id=f"USR-{_uuid.uuid4().hex[:10].upper()}",
+        username=req.username.strip().lower(),
+        full_name=req.full_name.strip(),
+        role=role,
+        pin=security.hash_credential(req.pin),  # bcrypt/PBKDF2 hash at rest
+        branch_id=req.branch_id.strip() or "BR-DEL-01",
+        is_active=True,
+    )
+    repo.save_user(user)
+    repo.record_audit_log(actor.id, "USER_CREATED", "USER", user.id, f"username={user.username} role={role.value}")
+    return {"success": True, "id": user.id, "username": user.username, "role": role.value}
+
+
+@app.patch("/api/auth/users/{user_id}/status")
+def set_store_user_status(user_id: str, req: UserStatusRequest, actor: User = Depends(require_roles(UserRole.ADMIN))):
+    target = repo.get_user_by_id(user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found.")
+    if target.id == actor.id:
+        raise HTTPException(status_code=400, detail="You cannot deactivate your own account.")
+    target.is_active = req.is_active
+    repo.save_user(target)
+    repo.record_audit_log(actor.id, "USER_STATUS_CHANGE", "USER", target.id, f"is_active={req.is_active}")
+    return {"success": True, "id": target.id, "is_active": target.is_active}
+
+
 @app.post("/api/auth/verify-pin")
-def verify_manager_pin(req: VerifyPinRequest):
+def verify_manager_pin(req: VerifyPinRequest, actor: User = Depends(require_manager)):
+    """Verify a staff member's PIN against HASHED credentials only.
+
+    SECURITY: There is deliberately NO hardcoded universal override PIN.
+    A match must come from a real, active provisioned user whose stored
+    credential passes constant-time hash verification, and whose role is
+    within the caller-declared allowed_roles set.
+
+    PRIVILEGE-ESCALATION HARDENING: this endpoint is restricted to
+    supervisor-or-above sessions (require_manager). A cashier session may
+    never use it to discover/validate manager or admin PINs. Additionally,
+    an operator may not "verify" their own PIN — overrides must come from a
+    second person of appropriate authority — and every attempt (success or
+    failure) is written to the immutable stock-movement audit trail.
+    """
     users = repo.list_users()
     matched = None
     for u in users:
-        if u.verify_pin(req.pin):
+        if not u.is_active:
+            continue
+        # Never let an operator validate their own credential through this path.
+        if u.id == actor.id:
+            continue
+        ok, new_hash = u.verify_and_upgrade_pin(req.pin)
+        if ok:
+            if new_hash:
+                repo.upgrade_user_pin_hash(u.id, u.pin)
             if req.allowed_roles is None or u.role.value in req.allowed_roles:
                 matched = u
                 break
-    
-    # Fallback default manager/admin PINs
-    if not matched and req.pin in ["2222", "9999"]:
-        return {"valid": True, "role": "STORE_MANAGER", "name": "Manager Override"}
-    
+
+    _audit_pin_event(actor, matched, req)
+
     if matched:
+        logger.info("PIN override authorized by %s for user %s (%s)", actor.username, matched.username, matched.role.value)
         return {"valid": True, "role": matched.role.value, "name": matched.full_name}
-    
+
     return {"valid": False, "role": None, "name": None}
+
+
+def _audit_pin_event(actor: User, matched: Optional[User], req: VerifyPinRequest) -> None:
+    """Write an immutable audit record for every manager-PIN override attempt."""
+    try:
+        repo.record_audit_log(
+            actor_id=actor.id,
+            action="PIN_OVERRIDE_GRANTED" if matched else "PIN_OVERRIDE_DENIED",
+            entity_type="AUTH",
+            entity_id=matched.id if matched else "NONE",
+            details=(
+                f"actor={actor.username}({actor.role.value}) "
+                f"matched={'yes:' + matched.username if matched else 'no'} "
+                f"allowed_roles={req.allowed_roles}"
+            ),
+        )
+    except Exception:  # auditing must never break the auth flow
+        logger.exception("Failed to write PIN override audit record")
 
 
 # --- CSV EXPORT REPORTS ---
 @app.get("/api/reports/sales-csv")
-def export_sales_report_csv():
+def export_sales_report_csv(actor: User = Depends(require_manager)):
     orders = repo.list_orders(limit=500)
     output = io.StringIO()
     writer = csv.writer(output)
@@ -991,7 +1339,7 @@ def export_sales_report_csv():
 
 
 @app.get("/api/reports/expenses-csv")
-def export_expenses_report_csv():
+def export_expenses_report_csv(actor: User = Depends(require_manager)):
     expenses = repo.list_expenses(limit=500)
     output = io.StringIO()
     writer = csv.writer(output)

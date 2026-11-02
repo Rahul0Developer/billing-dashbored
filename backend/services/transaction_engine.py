@@ -10,6 +10,8 @@ Enforces strict ACID transaction boundaries across:
 - Customer returns, refunds, and bill voiding
 """
 
+import html as _html
+
 from datetime import datetime, date
 from decimal import Decimal
 import time
@@ -45,6 +47,10 @@ from backend.services.pricing_engine import LoyaltyPricingEngine
 from backend.services.inventory_pq import InventoryPriorityQueue
 from backend.services.cache_service import LRUCacheService
 from backend.storage.repository import RetailRepository
+
+# Input bounds: hard limits that stop abusive payloads (mass-tampering / DoS).
+MAX_CHECKOUT_QTY_PER_ITEM = 1000
+MAX_CART_LINE_ITEMS = 200
 
 
 class POSTransactionEngine:
@@ -102,13 +108,42 @@ class POSTransactionEngine:
             b_name = "Indirapuram Flagship"
 
         # --- STEP 1: PRE-FLIGHT VALIDATION (Catalog & Stock Check) ---
+        # NOTE: This pass only rejects unknown barcodes and obviously absurd
+        # quantities. The authoritative stock check happens INSIDE the atomic
+        # transaction below (deduct_branch_stock_atomic), which re-reads and
+        # decrements rows under BEGIN IMMEDIATE -- closing the TOCTOU window
+        # where two concurrent cashiers could oversell the same shelf stock.
         consolidated_items: Dict[str, int] = {}
         for itm in raw_items:
-            barcode = itm.get("barcode", "").strip()
-            qty = int(itm.get("quantity", 1))
+            barcode = str(itm.get("barcode", "")).strip()
+            try:
+                qty = int(itm.get("quantity", 1))
+            except (TypeError, ValueError):
+                raise POSTransactionError(
+                    f"Invalid quantity for item '{barcode}'. Quantities must be whole numbers.",
+                    code="INVALID_QUANTITY",
+                )
             if qty <= 0:
                 continue
+            if qty > MAX_CHECKOUT_QTY_PER_ITEM:
+                raise POSTransactionError(
+                    f"Quantity {qty} for item '{barcode}' exceeds the per-item limit of "
+                    f"{MAX_CHECKOUT_QTY_PER_ITEM}. Split the sale or use a purchase order.",
+                    code="QUANTITY_LIMIT_EXCEEDED",
+                )
+            if not barcode:
+                raise POSTransactionError("Cart contains an item without a barcode.", code="EMPTY_BARCODE")
             consolidated_items[barcode] = consolidated_items.get(barcode, 0) + qty
+
+        if len(consolidated_items) > MAX_CART_LINE_ITEMS:
+            raise POSTransactionError(
+                f"Cart has more than {MAX_CART_LINE_ITEMS} distinct items.", code="CART_TOO_LARGE"
+            )
+        if any(qty > MAX_CHECKOUT_QTY_PER_ITEM for qty in consolidated_items.values()):
+            raise POSTransactionError(
+                f"Combined quantity for a single item exceeds the limit of {MAX_CHECKOUT_QTY_PER_ITEM}.",
+                code="QUANTITY_LIMIT_EXCEEDED",
+            )
 
         if not consolidated_items:
             raise POSTransactionError("No valid item quantities in cart.", code="EMPTY_CART")
@@ -386,10 +421,20 @@ class POSTransactionEngine:
         - Deducts customer spend & loyalty points
         - Updates cashier shift refund deductions
         """
-        # Authorization check
+        # Authorization check -- only real provisioned manager/admin accounts.
+        # SECURITY: no hardcoded universal override PINs are ever honoured.
         users = self.repo.list_users()
-        authorized = any(u.role in [UserRole.ADMIN, UserRole.STORE_MANAGER] and u.verify_pin(manager_pin) for u in users)
-        if not authorized and manager_pin not in ["2222", "9999"]:
+        matched_manager = None
+        for u in users:
+            if u.role in (UserRole.ADMIN, UserRole.STORE_MANAGER):
+                ok, new_hash = u.verify_and_upgrade_pin(manager_pin)
+                if ok:
+                    if new_hash:
+                        # Transparently migrate legacy plaintext PIN to a hash.
+                        self.repo.upgrade_user_pin_hash(u.id, u.pin)
+                    matched_manager = u
+                    break
+        if not matched_manager:
             raise UnauthorizedManagerError("Valid Store Manager or Admin PIN is required to process refunds!")
 
         order = self.repo.get_order_by_bill_number(bill_number)
@@ -440,6 +485,7 @@ class POSTransactionEngine:
             cashier_id=cashier_id,
             refund_amount=total_refund,
             reason=reason,
+            authorized_by=matched_manager.id,
             branch_id=order_branch_id,
             created_at=datetime.now(),
         )
@@ -531,9 +577,19 @@ class POSTransactionEngine:
         - Reverses cashier shift sales
         - Sets order status to CANCELLED
         """
+        # Authorization check -- only real provisioned manager/admin accounts.
+        # SECURITY: no hardcoded universal override PINs are ever honoured.
         users = self.repo.list_users()
-        authorized = any(u.role in [UserRole.ADMIN, UserRole.STORE_MANAGER] and u.verify_pin(manager_pin) for u in users)
-        if not authorized and manager_pin not in ["2222", "9999"]:
+        matched_manager = None
+        for u in users:
+            if u.role in (UserRole.ADMIN, UserRole.STORE_MANAGER):
+                ok, new_hash = u.verify_and_upgrade_pin(manager_pin)
+                if ok:
+                    if new_hash:
+                        self.repo.upgrade_user_pin_hash(u.id, u.pin)
+                    matched_manager = u
+                    break
+        if not matched_manager:
             raise UnauthorizedManagerError("Manager PIN authorization required to void a bill!")
 
         order = self.repo.get_order_by_bill_number(bill_number)
@@ -705,7 +761,14 @@ class POSTransactionEngine:
         return "\n".join(lines)
 
     def format_a4_tax_invoice(self, order: Order, customer: Optional[Customer]) -> str:
-        """Renders a formal A4 GST Tax Invoice layout in clean HTML with branch-specific details."""
+        """Renders a formal A4 GST Tax Invoice layout in clean HTML with branch-specific details.
+
+        SECURITY: every user-controlled value (product names, barcodes, customer
+        name/phone, cashier, notes, branch fields) is HTML-escaped before being
+        interpolated into the invoice markup to prevent stored XSS on the POS
+        terminal and any browser that renders the A4 invoice.
+        """
+        e = lambda v: _html.escape(str(v if v is not None else ""), quote=True)
         sym = STORE_PROFILE.currency_symbol
         half_tax = round_curr(order.total_tax / Decimal("2.0"))
 
@@ -725,8 +788,8 @@ class POSTransactionEngine:
             <tr>
                 <td style="text-align: center; border: 1px solid #cbd5e1; padding: 6px;">{idx}</td>
                 <td style="border: 1px solid #cbd5e1; padding: 6px;">
-                    <strong>{itm.product_name}</strong><br>
-                    <small style="color: #64748b;">Barcode: {itm.barcode}</small>
+                    <strong>{e(itm.product_name)}</strong><br>
+                    <small style="color: #64748b;">Barcode: {e(itm.barcode)}</small>
                 </td>
                 <td style="text-align: center; border: 1px solid #cbd5e1; padding: 6px;">{itm.quantity} {itm.unit}</td>
                 <td style="text-align: right; border: 1px solid #cbd5e1; padding: 6px;">{sym}{itm.unit_mrp:.2f}</td>
@@ -740,15 +803,15 @@ class POSTransactionEngine:
         <div style="font-family: Arial, sans-serif; max-width: 800px; margin: auto; padding: 20px; border: 2px solid #0f172a; color: #0f172a; background: #fff;">
             <div style="display: flex; justify-content: space-between; border-bottom: 2px solid #0f172a; padding-bottom: 12px; margin-bottom: 15px;">
                 <div>
-                    <h2 style="margin: 0; color: #1e3a8a;">{store_name}</h2>
+                    <h2 style="margin: 0; color: #1e3a8a;">{e(store_name)}</h2>
                     <p style="margin: 3px 0; font-size: 12px;">{STORE_PROFILE.tagline}</p>
-                    <p style="margin: 3px 0; font-size: 11px;">{addr1}, {addr2}</p>
-                    <p style="margin: 3px 0; font-size: 11px;"><strong>GSTIN:</strong> {store_gstin} | <strong>FSSAI:</strong> {STORE_PROFILE.fssai_license} | <strong>Tel:</strong> {store_phone}</p>
+                    <p style="margin: 3px 0; font-size: 11px;">{e(addr1)}, {e(addr2)}</p>
+                    <p style="margin: 3px 0; font-size: 11px;"><strong>GSTIN:</strong> {e(store_gstin)} | <strong>FSSAI:</strong> {STORE_PROFILE.fssai_license} | <strong>Tel:</strong> {e(store_phone)}</p>
                 </div>
                 <div style="text-align: right;">
                     <h3 style="margin: 0; color: #2563eb;">TAX INVOICE</h3>
-                    <p style="margin: 3px 0; font-size: 12px;"><strong>Invoice No:</strong> {order.bill_number}</p>
-                    <p style="margin: 3px 0; font-size: 12px;"><strong>Branch:</strong> {order.branch_name or 'Main Store'} ({order.branch_id or 'BR-01'})</p>
+                    <p style="margin: 3px 0; font-size: 12px;"><strong>Invoice No:</strong> {e(order.bill_number)}</p>
+                    <p style="margin: 3px 0; font-size: 12px;"><strong>Branch:</strong> {e(order.branch_name or 'Main Store')} ({e(order.branch_id or 'BR-01')})</p>
                     <p style="margin: 3px 0; font-size: 12px;"><strong>Date:</strong> {order.created_at.strftime('%d-%b-%Y %I:%M %p')}</p>
                     <p style="margin: 3px 0; font-size: 12px;"><strong>Status:</strong> {order.status.value}</p>
                 </div>
@@ -757,14 +820,14 @@ class POSTransactionEngine:
             <div style="display: flex; justify-content: space-between; background: #f8fafc; padding: 10px; border-radius: 6px; margin-bottom: 15px; font-size: 12px;">
                 <div>
                     <strong>Billed To:</strong><br>
-                    Name: {order.customer_name}<br>
-                    Phone: {order.customer_phone or 'Walk-in Consumer'}<br>
+                    Name: {e(order.customer_name)}<br>
+                    Phone: {e(order.customer_phone or 'Walk-in Consumer')}<br>
                     Customer Tier: {order.customer_tier.value}
                 </div>
                 <div>
                     <strong>Payment & Cashier:</strong><br>
                     Payment Mode: {order.payment_method.value}<br>
-                    Cashier ID: {order.cashier_name} ({order.cashier_id})
+                    Cashier ID: {e(order.cashier_name)} ({e(order.cashier_id)})
                 </div>
             </div>
 

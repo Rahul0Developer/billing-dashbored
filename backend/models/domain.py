@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, date
 from decimal import Decimal, ROUND_HALF_UP
 from enum import Enum
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 
 
 def round_curr(amount: Decimal) -> Decimal:
@@ -122,7 +122,31 @@ class User:
     is_active: bool = True
 
     def verify_pin(self, candidate_pin: str) -> bool:
-        return self.pin.strip() == candidate_pin.strip()
+        """
+        Constant-time verification of a candidate PIN against the stored value.
+
+        SECURITY: plaintext equality is intentionally NOT performed here. The
+        stored PIN must be a salted bcrypt/PBKDF2 hash (see backend/security.py).
+        Use `verify_and_upgrade_pin` for transparent migration of legacy rows.
+        """
+        from backend import security
+
+        ok, _ = security.authenticate(candidate_pin or "", self.pin or "")
+        return ok
+
+    def verify_and_upgrade_pin(self, candidate_pin: str) -> Tuple[bool, bool]:
+        """
+        Returns (authenticated, needs_rehash). When a legacy plaintext PIN
+        matches, `needs_rehash` is True so callers can persist the upgraded
+        hashed credential immediately.
+        """
+        from backend import security
+
+        ok, new_hash = security.authenticate(candidate_pin or "", self.pin or "")
+        if ok and new_hash is not None:
+            self.pin = new_hash
+            return True, True
+        return ok, False
 
 
 @dataclass
@@ -417,6 +441,7 @@ class ReturnRecord:
     cashier_id: str
     refund_amount: Decimal
     reason: str
+    authorized_by: str = ""  # user id of the manager/admin who approved the refund
     branch_id: str = "BR-DEL-01"
     created_at: datetime = field(default_factory=datetime.now)
 

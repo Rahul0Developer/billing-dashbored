@@ -23,10 +23,90 @@ const state = {
   theme: localStorage.getItem("apex_theme") || "light"
 };
 
+
+// ============================================================================
+// SECURITY HELPERS (XSS escaping + authenticated API transport)
+// ============================================================================
+const authSession = {
+  token: sessionStorage.getItem("apex_pos_token") || null,
+  user: JSON.parse(sessionStorage.getItem("apex_pos_user") || "null"),
+  set(token, user) {
+    this.token = token; this.user = user;
+    sessionStorage.setItem("apex_pos_token", token);
+    sessionStorage.setItem("apex_pos_user", JSON.stringify(user));
+  },
+  clear() {
+    this.token = null; this.user = null;
+    sessionStorage.removeItem("apex_pos_token");
+    sessionStorage.removeItem("apex_pos_user");
+  }
+};
+
+/** Escape untrusted values before any innerHTML interpolation (prevents XSS). */
+function escHtml(value) {
+  return String(value === null || value === undefined ? "" : value)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+/** Authenticated fetch wrapper: attaches bearer token, handles 401 -> login. */
+async function apiFetch(url, options = {}) {
+  const headers = Object.assign({}, options.headers || {});
+  if (authSession.token) headers["Authorization"] = "Bearer " + authSession.token;
+  if (options.body && !headers["Content-Type"]) headers["Content-Type"] = "application/json";
+  const res = await fetch(url, Object.assign({}, options, { headers, credentials: "same-origin" }));
+  if (res.status === 401) { authSession.clear(); showLoginOverlay(); }
+  return res;
+}
+
+function showLoginOverlay() {
+  if (document.getElementById("login-overlay")) return;
+  const overlay = document.createElement("div");
+  overlay.id = "login-overlay";
+  overlay.style.cssText = "position:fixed;inset:0;background:rgba(15,23,42,.92);z-index:9999;display:flex;align-items:center;justify-content:center;";
+  overlay.innerHTML = `
+    <form id="login-form" style="background:#fff;border-radius:14px;padding:32px;width:340px;box-shadow:0 20px 60px rgba(0,0,0,.4);">
+      <h2 style="margin:0 0 4px;color:#1e3a8a;">Apex POS Login</h2>
+      <p style="margin:0 0 18px;font-size:13px;color:#64748b;">Authenticate to access the register.</p>
+      <label style="display:block;font-size:12px;font-weight:600;margin-bottom:4px;color:#334155;">Username</label>
+      <input id="login-username" autocomplete="username" style="width:100%;padding:10px;border:1px solid #cbd5e1;border-radius:8px;margin-bottom:12px;" />
+      <label style="display:block;font-size:12px;font-weight:600;margin-bottom:4px;color:#334155;">PIN</label>
+      <input id="login-pin" type="password" inputmode="numeric" autocomplete="current-password" style="width:100%;padding:10px;border:1px solid #cbd5e1;border-radius:8px;margin-bottom:16px;" />
+      <button type="submit" style="width:100%;padding:12px;background:#2563eb;color:#fff;border:0;border-radius:8px;font-weight:700;cursor:pointer;">Sign In</button>
+      <div id="login-error" style="margin-top:10px;font-size:12px;color:#dc2626;"></div>
+    </form>`;
+  document.body.appendChild(overlay);
+  document.getElementById("login-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const u = document.getElementById("login-username").value.trim();
+    const p = document.getElementById("login-pin").value;
+    try {
+      const res = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: u, pin: p })
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        document.getElementById("login-error").textContent = data.detail || "Invalid credentials.";
+        return;
+      }
+      authSession.set(data.token, data.user);
+      state.activeUser = { id: data.user.id, name: data.user.name, role: data.user.role };
+      overlay.remove();
+      showToast(`Welcome back, ${escHtml(data.user.name)} (${escHtml(data.user.role)})`, "success");
+      bootstrapApp();
+    } catch (err) {
+      document.getElementById("login-error").textContent = "Network error. Try again.";
+    }
+  });
+  setTimeout(() => document.getElementById("login-username").focus(), 50);
+}
+
 // ============================================================================
 // INITIALIZATION ON DOM READY
 // ============================================================================
-document.addEventListener("DOMContentLoaded", () => {
+function bootstrapApp() {
   initTheme();
   initClock();
   initUserSelector();
@@ -40,6 +120,16 @@ document.addEventListener("DOMContentLoaded", () => {
   initCustomerEvents();
   initExpenseEvents();
   loadInitialStoreData();
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  initTheme();
+  if (authSession.token && authSession.user) {
+    state.activeUser = { id: authSession.user.id, name: authSession.user.name, role: authSession.user.role };
+    bootstrapApp();
+  } else {
+    showLoginOverlay();
+  }
 });
 
 // --- THEME TOGGLE (LIGHT / DARK) ---
@@ -84,13 +174,35 @@ function initClock() {
 
 // --- ACTIVE USER SELECTOR ---
 function initUserSelector() {
+  // SECURITY: operator identity is fixed by the authenticated session token.
+  // The old free-switching dropdown allowed cashier spoofing and is removed.
   const userSelect = document.getElementById("active-user-select");
-  userSelect.addEventListener("change", (e) => {
-    const [id, name, role] = e.target.value.split("|");
-    state.activeUser = { id, name, role };
-    showToast(`Cashier switched to ${name} (${role})`, "info");
-    loadShiftStatus();
-  });
+  if (!userSelect) return;
+  const wrapper = userSelect.parentElement;
+  if (authSession.user) {
+    const u = authSession.user;
+    state.activeUser = { id: u.id, name: u.name, role: u.role };
+    userSelect.innerHTML = `<option>${escHtml(u.name)} (${escHtml(u.role)})</option>`;
+    userSelect.disabled = true;
+    userSelect.style.pointerEvents = "none";
+    // Logout button
+    if (!document.getElementById("logout-btn")) {
+      const btn = document.createElement("button");
+      btn.id = "logout-btn";
+      btn.type = "button";
+      btn.textContent = "Logout";
+      btn.title = "End this POS session";
+      btn.style.cssText = "margin-left:8px;padding:6px 12px;border:1px solid #cbd5e1;border-radius:8px;background:#fff;color:#334155;font-weight:600;cursor:pointer;font-size:12px;";
+      btn.onclick = async () => {
+        try { await apiFetch("/api/auth/logout", { method: "POST" }); } catch (e) { /* ignore */ }
+        authSession.clear();
+        location.reload();
+      };
+      wrapper.appendChild(btn);
+    }
+  } else {
+    showLoginOverlay();
+  }
 }
 
 // --- SIDEBAR NAVIGATION ---
@@ -156,7 +268,7 @@ function initNavigation() {
 async function loadInitialStoreData() {
   try {
     // 1. Fetch branches list
-    const bRes = await fetch("/api/branches");
+    const bRes = await apiFetch("/api/branches");
     if (bRes.ok) {
       state.branches = await bRes.json();
       if (!state.activeBranch && state.branches.length > 0) {
@@ -165,8 +277,8 @@ async function loadInitialStoreData() {
       const bSelect = document.getElementById("active-branch-select");
       if (bSelect) {
         bSelect.innerHTML = state.branches.map(b => `
-          <option value="${b.id}" ${b.id === state.activeBranch.id ? 'selected' : ''}>
-            ${b.name} (${b.code})
+          <option value="${escHtml(b.id)}" ${escHtml(b.id === state.activeBranch.id ? 'selected' : '')}>
+            ${escHtml(b.name)} (${escHtml(b.code)})
           </option>
         `).join("");
       }
@@ -174,11 +286,11 @@ async function loadInitialStoreData() {
 
     // 2. Fetch branch-specific inventory shelf stock
     const branchId = state.activeBranch ? state.activeBranch.id : "BR-DEL-01";
-    const res = await fetch(`/api/branches/${branchId}/inventory`);
+    const res = await apiFetch(`/api/branches/${branchId}/inventory`);
     if (res.ok) {
       state.allProducts = await res.json();
     } else {
-      const pRes = await fetch("/api/products");
+      const pRes = await apiFetch("/api/products");
       state.allProducts = await pRes.json();
     }
 
@@ -211,7 +323,7 @@ function initPosEvents() {
 
     debounceTimer = setTimeout(async () => {
       try {
-        const res = await fetch(`/api/products/search?q=${encodeURIComponent(query)}`);
+        const res = await apiFetch(`/api/products/search?q=${encodeURIComponent(query)}`);
         const matches = await res.json();
         renderSuggestions(matches);
       } catch (err) {
@@ -236,7 +348,7 @@ function initPosEvents() {
       } else {
         // Try searching Trie prefix
         try {
-          const res = await fetch(`/api/products/search?q=${encodeURIComponent(code)}`);
+          const res = await apiFetch(`/api/products/search?q=${encodeURIComponent(code)}`);
           const matches = await res.json();
           if (matches.length > 0) {
             addItemToCart(matches[0]);
@@ -403,19 +515,19 @@ function renderShelfProducts(products) {
   }
 
   grid.innerHTML = products.map(p => `
-    <div class="product-item-card" onclick="addBarcodeToCart('${p.barcode}')">
+    <div class="product-item-card" onclick="addBarcodeToCart('${escHtml(p.barcode)}')">
       <div>
-        <span class="cat-badge">${p.category}</span>
-        <h4>${p.name}</h4>
-        <div class="barcode-tag">${p.barcode}</div>
+        <span class="cat-badge">${escHtml(p.category)}</span>
+        <h4>${escHtml(p.name)}</h4>
+        <div class="barcode-tag">${escHtml(p.barcode)}</div>
       </div>
       <div>
         <div class="product-pricing-box">
           <span class="selling-price">₹${p.selling_price.toFixed(2)}</span>
           <span class="mrp-price">₹${p.mrp.toFixed(2)}</span>
         </div>
-        <div class="product-stock-tag ${p.is_low_stock ? 'low' : ''}">
-          Stock: ${p.stock_quantity} ${p.unit} ${p.is_low_stock ? '⚠️ [Low]' : ''}
+        <div class="product-stock-tag ${escHtml(p.is_low_stock ? 'low' : '')}">
+          Stock: ${escHtml(p.stock_quantity)} ${escHtml(p.unit)} ${escHtml(p.is_low_stock ? '⚠️ [Low]' : '')}
         </div>
       </div>
     </div>
@@ -430,10 +542,10 @@ function renderSuggestions(matches) {
   }
 
   box.innerHTML = matches.map(m => `
-    <div class="autocomplete-item" onclick="selectSuggestion('${m.barcode}')">
+    <div class="autocomplete-item" onclick="selectSuggestion('${escHtml(m.barcode)}')">
       <div>
-        <strong>${m.name}</strong>
-        <small style="display:block; color: var(--text-muted); font-family: var(--font-mono);">${m.barcode} | ${m.category}</small>
+        <strong>${escHtml(m.name)}</strong>
+        <small style="display:block; color: var(--text-muted); font-family: var(--font-mono);">${escHtml(m.barcode)} | ${escHtml(m.category)}</small>
       </div>
       <div style="text-align: right;">
         <span style="color: var(--success-dark); font-weight: 800;">₹${m.selling_price.toFixed(2)}</span>
@@ -516,7 +628,7 @@ async function recalculateCart() {
   const pointsToRedeem = (redeemChk && redeemChk.checked && state.activeCustomer) ? state.activeCustomer.points : 0;
 
   try {
-    const res = await fetch("/api/pos/calculate", {
+    const res = await apiFetch("/api/pos/calculate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -551,20 +663,20 @@ function renderCartTable() {
   tbody.innerHTML = state.cart.map(item => `
     <tr>
       <td class="cart-item-desc">
-        <strong>${item.name}</strong>
-        <small>${item.barcode} | MRP: ₹${item.mrp.toFixed(2)}</small>
+        <strong>${escHtml(item.name)}</strong>
+        <small>${escHtml(item.barcode)} | MRP: ₹${item.mrp.toFixed(2)}</small>
       </td>
       <td class="text-center">
         <div class="cart-qty-ctrl">
-          <button class="qty-btn" onclick="updateCartQty('${item.barcode}', -1)">-</button>
-          <span style="font-weight: 700; min-width: 20px;">${item.quantity}</span>
-          <button class="qty-btn" onclick="updateCartQty('${item.barcode}', 1)">+</button>
+          <button class="qty-btn" onclick="updateCartQty('${escHtml(item.barcode)}', -1)">-</button>
+          <span style="font-weight: 700; min-width: 20px;">${escHtml(item.quantity)}</span>
+          <button class="qty-btn" onclick="updateCartQty('${escHtml(item.barcode)}', 1)">+</button>
         </div>
       </td>
       <td class="text-right">₹${item.price.toFixed(2)}</td>
       <td class="text-right"><strong>₹${(item.price * item.quantity).toFixed(2)}</strong></td>
       <td class="text-center">
-        <button class="cart-del-btn" onclick="removeCartItem('${item.barcode}')" title="Delete">
+        <button class="cart-del-btn" onclick="removeCartItem('${escHtml(item.barcode)}')" title="Delete">
           <i class="fa-solid fa-trash-can"></i>
         </button>
       </td>
@@ -641,7 +753,7 @@ async function performCustomerLookup(identifier) {
   }
 
   try {
-    const res = await fetch(`/api/customers/recognize?identifier=${encodeURIComponent(clean)}`);
+    const res = await apiFetch(`/api/customers/recognize?identifier=${encodeURIComponent(clean)}`);
     const data = await res.json();
 
     const banner = document.getElementById("customer-profile-banner");
@@ -815,10 +927,10 @@ window.showCustomerMemberCard = function(customer) {
 // Display Customer Shopping Habits & Insights Modal
 window.showCustomerInsightsModal = async function(phone) {
   try {
-    const res = await fetch(`/api/customers/${encodeURIComponent(phone)}/insights`);
+    const res = await apiFetch(`/api/customers/${encodeURIComponent(phone)}/insights`);
     const data = await res.json();
 
-    document.getElementById("insights-modal-title").innerHTML = `<i class="fa-solid fa-chart-pie"></i> ${data.name} (${data.phone}) - Shopping Habits`;
+    document.getElementById("insights-modal-title").innerHTML = `<i class="fa-solid fa-chart-pie"></i> ${escHtml(data.name)} (${escHtml(data.phone)}) - Shopping Habits`;
 
     // 1. Preferred Categories
     const catContainer = document.getElementById("cust-insights-categories");
@@ -829,11 +941,11 @@ window.showCustomerInsightsModal = async function(phone) {
         catContainer.innerHTML = data.category_preferences.map(c => `
           <div class="mb-10" style="margin-bottom: 12px;">
             <div style="display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 4px;">
-              <strong>${c.category}</strong>
-              <span>₹${c.spent.toFixed(2)} (${c.percentage}%)</span>
+              <strong>${escHtml(c.category)}</strong>
+              <span>₹${c.spent.toFixed(2)} (${escHtml(c.percentage)}%)</span>
             </div>
             <div class="progress-track">
-              <div class="progress-fill active" style="width: ${c.percentage}%;"></div>
+              <div class="progress-fill active" style="width: ${escHtml(c.percentage)}%;"></div>
             </div>
           </div>
         `).join("");
@@ -848,8 +960,8 @@ window.showCustomerInsightsModal = async function(phone) {
       } else {
         prodTbody.innerHTML = data.top_purchased_products.map(p => `
           <tr>
-            <td><strong>${p.name}</strong><br><small class="text-muted">${p.category}</small></td>
-            <td class="text-center font-weight-bold">${p.units}</td>
+            <td><strong>${escHtml(p.name)}</strong><br><small class="text-muted">${escHtml(p.category)}</small></td>
+            <td class="text-center font-weight-bold">${escHtml(p.units)}</td>
             <td class="text-right">₹${p.spent.toFixed(2)}</td>
           </tr>
         `).join("");
@@ -865,11 +977,11 @@ window.showCustomerInsightsModal = async function(phone) {
         ordContainer.innerHTML = data.recent_orders.map(o => `
           <div class="card mb-10" style="padding: 10px 14px; margin-bottom: 10px; background: var(--bg-surface-elevated);">
             <div style="display: flex; justify-content: space-between; font-weight: 700; font-size: 13px;">
-              <span>Bill: ${o.bill_number} (${o.date})</span>
-              <span style="color: var(--success-dark);">₹${o.grand_total.toFixed(2)} [${o.payment_method}]</span>
+              <span>Bill: ${escHtml(o.bill_number)} (${escHtml(o.date)})</span>
+              <span style="color: var(--success-dark);">₹${o.grand_total.toFixed(2)} [${escHtml(o.payment_method)}]</span>
             </div>
             <div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">
-              Items: ${o.items_count} | Savings: ₹${o.savings.toFixed(2)}
+              Items: ${escHtml(o.items_count)} | Savings: ₹${o.savings.toFixed(2)}
             </div>
           </div>
         `).join("");
@@ -910,7 +1022,7 @@ async function executeCheckout() {
   };
 
   try {
-    const res = await fetch("/api/pos/checkout", {
+    const res = await apiFetch("/api/pos/checkout", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload)
@@ -1007,7 +1119,7 @@ function initSalesEvents() {
 async function loadSalesOrders() {
   try {
     const branchId = state.activeBranch ? state.activeBranch.id : "BR-DEL-01";
-    const res = await fetch(`/api/orders?branch_id=${branchId}`);
+    const res = await apiFetch(`/api/orders?branch_id=${branchId}`);
     state.recentOrders = await res.json();
     renderSalesTable(state.recentOrders);
   } catch (err) {
@@ -1040,21 +1152,21 @@ function renderSalesTable(orders) {
 
   tbody.innerHTML = orders.map(o => `
     <tr>
-      <td><strong><code>${o.bill_number}</code></strong></td>
-      <td>${o.date}</td>
-      <td>${o.customer}</td>
-      <td>${o.cashier}</td>
-      <td class="text-center">${o.items_count}</td>
-      <td class="text-center"><span class="status-pill">${o.payment_method}</span></td>
+      <td><strong><code>${escHtml(o.bill_number)}</code></strong></td>
+      <td>${escHtml(o.date)}</td>
+      <td>${escHtml(o.customer)}</td>
+      <td>${escHtml(o.cashier)}</td>
+      <td class="text-center">${escHtml(o.items_count)}</td>
+      <td class="text-center"><span class="status-pill">${escHtml(o.payment_method)}</span></td>
       <td class="text-right"><strong>₹${o.grand_total.toFixed(2)}</strong></td>
       <td class="text-center">
-        <span class="status-pill ${o.status.toLowerCase()}">${o.status}</span>
+        <span class="status-pill ${escHtml(o.status.toLowerCase())}">${escHtml(o.status)}</span>
       </td>
       <td class="text-center" style="white-space: nowrap;">
-        <button class="btn-secondary" style="padding: 4px 8px; font-size: 11px;" onclick="reprintThermal('${o.bill_number}')" title="Reprint 80mm Thermal">
+        <button class="btn-secondary" style="padding: 4px 8px; font-size: 11px;" onclick="reprintThermal('${escHtml(o.bill_number)}')" title="Reprint 80mm Thermal">
           <i class="fa-solid fa-receipt"></i>
         </button>
-        <button class="btn-secondary" style="padding: 4px 8px; font-size: 11px;" onclick="viewA4Invoice('${o.bill_number}')" title="View A4 Tax Invoice">
+        <button class="btn-secondary" style="padding: 4px 8px; font-size: 11px;" onclick="viewA4Invoice('${escHtml(o.bill_number)}')" title="View A4 Tax Invoice">
           <i class="fa-solid fa-file-invoice"></i>
         </button>
         ${o.status === 'COMPLETED' ? `
@@ -1069,7 +1181,7 @@ function renderSalesTable(orders) {
 
 window.reprintThermal = async function(billNumber) {
   try {
-    const res = await fetch(`/api/orders/${billNumber}/thermal`);
+    const res = await apiFetch(`/api/orders/${billNumber}/thermal`);
     const txt = await res.text();
     document.getElementById("receipt-content").textContent = txt;
     document.getElementById("receipt-modal").classList.remove("hidden");
@@ -1080,7 +1192,7 @@ window.reprintThermal = async function(billNumber) {
 
 window.viewA4Invoice = async function(billNumber) {
   try {
-    const res = await fetch(`/api/orders/${billNumber}/a4`);
+    const res = await apiFetch(`/api/orders/${billNumber}/a4`);
     const html = await res.text();
     document.getElementById("a4-invoice-content").innerHTML = html;
     document.getElementById("a4-invoice-modal").classList.remove("hidden");
@@ -1106,7 +1218,7 @@ async function submitVoidBill() {
   }
 
   try {
-    const res = await fetch(`/api/orders/${state.voidTargetBill}/void`, {
+    const res = await apiFetch(`/api/orders/${state.voidTargetBill}/void`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ manager_pin: pin, reason: reason })
@@ -1132,7 +1244,7 @@ async function fetchBillForReturn() {
   if (!billNum) return;
 
   try {
-    const res = await fetch(`/api/orders/${billNum}`);
+    const res = await apiFetch(`/api/orders/${billNum}`);
     if (!res.ok) throw new Error("Bill not found");
     const order = await res.json();
 
@@ -1141,18 +1253,18 @@ async function fetchBillForReturn() {
     tbody.innerHTML = order.items.map(i => `
       <tr>
         <td class="text-center">
-          <input type="checkbox" class="return-item-chk" data-barcode="${i.barcode}" data-price="${i.unit_price}" ${i.is_returned ? 'disabled' : ''}>
+          <input type="checkbox" class="return-item-chk" data-barcode="${escHtml(i.barcode)}" data-price="${escHtml(i.unit_price)}" ${escHtml(i.is_returned ? 'disabled' : '')}>
         </td>
         <td>
-          <strong>${i.product_name}</strong>
-          ${i.is_returned ? '<span class="status-pill refunded" style="font-size: 9px;">ALREADY RETURNED</span>' : ''}
+          <strong>${escHtml(i.product_name)}</strong>
+          ${escHtml(i.is_returned ? '<span class="status-pill refunded" style="font-size: 9px;">ALREADY RETURNED</span>' : '')}
         </td>
-        <td class="text-center">${i.quantity}</td>
+        <td class="text-center">${escHtml(i.quantity)}</td>
         <td class="text-center">
-          <input type="number" class="return-qty-input" data-barcode="${i.barcode}" min="1" max="${i.quantity}" value="1" style="width: 50px; text-align: center;" ${i.is_returned ? 'disabled' : ''}>
+          <input type="number" class="return-qty-input" data-barcode="${escHtml(i.barcode)}" min="1" max="${escHtml(i.quantity)}" value="1" style="width: 50px; text-align: center;" ${escHtml(i.is_returned ? 'disabled' : '')}>
         </td>
         <td class="text-right">₹${i.unit_price.toFixed(2)}</td>
-        <td class="text-right return-line-refund" data-barcode="${i.barcode}">₹0.00</td>
+        <td class="text-right return-line-refund" data-barcode="${escHtml(i.barcode)}">₹0.00</td>
       </tr>
     `).join("");
 
@@ -1216,7 +1328,7 @@ async function submitCustomerReturn() {
   }
 
   try {
-    const res = await fetch("/api/returns/process", {
+    const res = await apiFetch("/api/returns/process", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -1274,7 +1386,7 @@ function initShiftEvents() {
 
 async function loadShiftStatus() {
   try {
-    const res = await fetch(`/api/shifts/current?cashier_id=${state.activeUser.id}`);
+    const res = await apiFetch(`/api/shifts/current?cashier_id=${state.activeUser.id}`);
     const shift = await res.json();
     state.currentShift = shift;
 
@@ -1292,26 +1404,26 @@ async function loadShiftStatus() {
 
 async function loadShiftsHistory() {
   try {
-    const res = await fetch("/api/shifts/history");
+    const res = await apiFetch("/api/shifts/history");
     const shifts = await res.json();
 
     const tbody = document.getElementById("shifts-history-tbody");
     tbody.innerHTML = shifts.map(s => `
       <tr>
-        <td><code>${s.id}</code></td>
-        <td>${s.cashier_name}</td>
-        <td>${s.start_time}</td>
-        <td>${s.end_time}</td>
+        <td><code>${escHtml(s.id)}</code></td>
+        <td>${escHtml(s.cashier_name)}</td>
+        <td>${escHtml(s.start_time)}</td>
+        <td>${escHtml(s.end_time)}</td>
         <td class="text-right">₹${s.opening_float.toFixed(2)}</td>
         <td class="text-right">₹${s.total_sales.toFixed(2)}</td>
         <td class="text-right">₹${s.expected_drawer_cash.toFixed(2)}</td>
         <td class="text-right">₹${s.actual_counted_cash.toFixed(2)}</td>
-        <td class="text-right" style="color: ${s.cash_variance === 0 ? 'var(--success-dark)' : s.cash_variance < 0 ? 'var(--danger-dark)' : 'var(--warning-dark)'}; font-weight: 800;">
-          ${s.cash_variance >= 0 ? '+' : ''}₹${s.cash_variance.toFixed(2)}
+        <td class="text-right" style="color: ${escHtml(s.cash_variance === 0 ? 'var(--success-dark)' : s.cash_variance < 0 ? 'var(--danger-dark)' : 'var(--warning-dark)')}; font-weight: 800;">
+          ${escHtml(s.cash_variance >= 0 ? '+' : '')}₹${s.cash_variance.toFixed(2)}
         </td>
         <td class="text-center">
-          <span class="status-pill ${s.is_closed ? 'completed' : 'in-progress'}">
-            ${s.is_closed ? 'CLOSED' : 'OPEN'}
+          <span class="status-pill ${escHtml(s.is_closed ? 'completed' : 'in-progress')}">
+            ${escHtml(s.is_closed ? 'CLOSED' : 'OPEN')}
           </span>
         </td>
       </tr>
@@ -1331,7 +1443,7 @@ async function executeSafeDrop() {
   }
 
   try {
-    const res = await fetch("/api/shifts/drop", {
+    const res = await apiFetch("/api/shifts/drop", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -1364,7 +1476,7 @@ async function executeCloseShift() {
   }
 
   try {
-    const res = await fetch("/api/shifts/close", {
+    const res = await apiFetch("/api/shifts/close", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -1423,7 +1535,7 @@ function initDashboardEvents() {
 async function loadDashboardData(period = "today") {
   try {
     const branchId = state.activeBranch ? state.activeBranch.id : "BR-DEL-01";
-    const res = await fetch(`/api/dashboard?branch_id=${branchId}`);
+    const res = await apiFetch(`/api/dashboard?branch_id=${branchId}`);
     const data = await res.json();
     state.dashboardData = data;
 
@@ -1451,9 +1563,9 @@ async function loadDashboardData(period = "today") {
     const topTbody = document.getElementById("top-products-tbody");
     topTbody.innerHTML = data.top_moving_products.map(p => `
       <tr>
-        <td><strong>${p.name}</strong></td>
-        <td><span class="status-pill">${p.category}</span></td>
-        <td class="text-center"><strong>${p.units_sold}</strong></td>
+        <td><strong>${escHtml(p.name)}</strong></td>
+        <td><span class="status-pill">${escHtml(p.category)}</span></td>
+        <td class="text-center"><strong>${escHtml(p.units_sold)}</strong></td>
         <td class="text-right">₹${p.revenue.toFixed(2)}</td>
       </tr>
     `).join("");
@@ -1462,10 +1574,10 @@ async function loadDashboardData(period = "today") {
     const lowTbody = document.getElementById("low-stock-tbody");
     lowTbody.innerHTML = data.low_stock_alerts.map(p => `
       <tr>
-        <td><strong>${p.name}</strong></td>
-        <td>${p.category}</td>
-        <td class="text-center" style="color: var(--danger-dark); font-weight: 800;">${p.current_stock}</td>
-        <td class="text-center">${p.reorder_level}</td>
+        <td><strong>${escHtml(p.name)}</strong></td>
+        <td>${escHtml(p.category)}</td>
+        <td class="text-center" style="color: var(--danger-dark); font-weight: 800;">${escHtml(p.current_stock)}</td>
+        <td class="text-center">${escHtml(p.reorder_level)}</td>
         <td class="text-center"><span class="status-pill cancelled">CRITICAL REORDER</span></td>
       </tr>
     `).join("");
@@ -1559,7 +1671,7 @@ function renderCategoryChart(catData) {
 async function loadBusinessIntelligenceData() {
   try {
     const branchId = state.activeBranch ? state.activeBranch.id : "BR-DEL-01";
-    const res = await fetch(`/api/analytics/business-intelligence?branch_id=${branchId}`);
+    const res = await apiFetch(`/api/analytics/business-intelligence?branch_id=${branchId}`);
     if (!res.ok) throw new Error("Failed to load business intelligence");
     const bi = await res.json();
     state.businessIntelligence = bi;
@@ -1572,16 +1684,16 @@ async function loadBusinessIntelligenceData() {
       } else {
         bsTbody.innerHTML = bi.best_selling_products.map(p => `
           <tr>
-            <td class="text-center"><span class="rank-badge ${p.rank <= 3 ? 'top3' : ''}">#${p.rank}</span></td>
-            <td><strong>${p.name}</strong><br><small class="text-muted">${p.brand}</small></td>
-            <td><code>${p.barcode}</code></td>
-            <td><span class="status-pill">${p.category}</span></td>
-            <td class="text-center">${p.units_sold_30d}</td>
-            <td class="text-center font-weight-bold">${p.units_sold}</td>
+            <td class="text-center"><span class="rank-badge ${escHtml(p.rank <= 3 ? 'top3' : '')}">#${escHtml(p.rank)}</span></td>
+            <td><strong>${escHtml(p.name)}</strong><br><small class="text-muted">${escHtml(p.brand)}</small></td>
+            <td><code>${escHtml(p.barcode)}</code></td>
+            <td><span class="status-pill">${escHtml(p.category)}</span></td>
+            <td class="text-center">${escHtml(p.units_sold_30d)}</td>
+            <td class="text-center font-weight-bold">${escHtml(p.units_sold)}</td>
             <td class="text-right font-weight-bold">₹${p.gross_revenue.toFixed(2)}</td>
             <td class="text-right" style="color: var(--success-dark); font-weight: 700;">₹${p.gross_profit.toFixed(2)}</td>
-            <td class="text-center font-weight-bold">${p.profit_margin_percent}%</td>
-            <td class="text-center">${p.current_stock}</td>
+            <td class="text-center font-weight-bold">${escHtml(p.profit_margin_percent)}%</td>
+            <td class="text-center">${escHtml(p.current_stock)}</td>
           </tr>
         `).join("");
       }
@@ -1600,17 +1712,17 @@ async function loadBusinessIntelligenceData() {
         } else {
           smTbody.innerHTML = sm.items.map(s => `
             <tr>
-              <td><strong>${s.name}</strong><br><small class="text-muted">${s.barcode} | ${s.brand}</small></td>
-              <td><span class="status-pill">${s.category}</span></td>
-              <td class="text-center font-weight-bold">${s.current_stock}</td>
-              <td class="text-center">${s.units_sold_30d}</td>
+              <td><strong>${escHtml(s.name)}</strong><br><small class="text-muted">${escHtml(s.barcode)} | ${escHtml(s.brand)}</small></td>
+              <td><span class="status-pill">${escHtml(s.category)}</span></td>
+              <td class="text-center font-weight-bold">${escHtml(s.current_stock)}</td>
+              <td class="text-center">${escHtml(s.units_sold_30d)}</td>
               <td class="text-right">₹${s.cost_price.toFixed(2)}</td>
               <td class="text-right">₹${s.selling_price.toFixed(2)}</td>
               <td class="text-right" style="color: var(--danger-dark); font-weight: 800;">₹${s.capital_locked.toFixed(2)}</td>
               <td class="text-center">
-                <span class="risk-chip ${s.risk_level.toLowerCase()}">${s.risk_level.replace(/_/g, " ")}</span>
+                <span class="risk-chip ${escHtml(s.risk_level.toLowerCase())}">${escHtml(s.risk_level.replace(/_/g, " "))}</span>
               </td>
-              <td><span style="font-size: 11px; font-weight: 600;">${s.recommended_action}</span></td>
+              <td><span style="font-size: 11px; font-weight: 600;">${escHtml(s.recommended_action)}</span></td>
             </tr>
           `).join("");
         }
@@ -1643,8 +1755,8 @@ async function loadBusinessIntelligenceData() {
       if (tiersTbody) {
         tiersTbody.innerHTML = cr.tier_distribution.map(t => `
           <tr>
-            <td><span class="tier-chip-badge ${t.tier.toLowerCase()}">${t.tier}</span></td>
-            <td class="text-center font-weight-bold">${t.customers_count}</td>
+            <td><span class="tier-chip-badge ${escHtml(t.tier.toLowerCase())}">${escHtml(t.tier)}</span></td>
+            <td class="text-center font-weight-bold">${escHtml(t.customers_count)}</td>
             <td class="text-right"><strong>₹${t.total_spend.toFixed(2)}</strong></td>
           </tr>
         `).join("");
@@ -1669,10 +1781,10 @@ async function loadBusinessIntelligenceData() {
         } else {
           catTbody.innerHTML = sd.category_distribution.map(c => `
             <tr>
-              <td><strong>${c.category}</strong></td>
-              <td class="text-center font-weight-bold">${c.units_sold}</td>
+              <td><strong>${escHtml(c.category)}</strong></td>
+              <td class="text-center font-weight-bold">${escHtml(c.units_sold)}</td>
               <td class="text-right"><strong>₹${c.revenue.toFixed(2)}</strong></td>
-              <td class="text-right"><span class="status-pill">${c.share_percent}%</span></td>
+              <td class="text-right"><span class="status-pill">${escHtml(c.share_percent)}%</span></td>
             </tr>
           `).join("");
         }
@@ -1692,20 +1804,20 @@ async function loadBusinessIntelligenceData() {
         } else {
           restockTbody.innerHTML = rp.items.map(r => `
             <tr>
-              <td><strong>${r.name}</strong><br><small class="text-muted">${r.brand}</small></td>
-              <td><code>${r.barcode}</code></td>
-              <td><span class="status-pill">${r.category}</span></td>
-              <td class="text-center" style="${r.current_stock === 0 ? 'color: var(--danger-dark); font-weight: 800;' : 'font-weight: 700;'}">${r.current_stock}</td>
-              <td class="text-center">${r.reorder_level}</td>
-              <td class="text-center">${r.depletion_ratio}x</td>
+              <td><strong>${escHtml(r.name)}</strong><br><small class="text-muted">${escHtml(r.brand)}</small></td>
+              <td><code>${escHtml(r.barcode)}</code></td>
+              <td><span class="status-pill">${escHtml(r.category)}</span></td>
+              <td class="text-center" style="${escHtml(r.current_stock === 0 ? 'color: var(--danger-dark); font-weight: 800;' : 'font-weight: 700;')}">${escHtml(r.current_stock)}</td>
+              <td class="text-center">${escHtml(r.reorder_level)}</td>
+              <td class="text-center">${escHtml(r.depletion_ratio)}x</td>
               <td class="text-center">
-                <span class="status-pill ${r.current_stock === 0 ? 'cancelled' : r.depletion_ratio <= 0.5 ? 'refunded' : 'completed'}">
-                  ${r.urgency.replace(/_/g, " ")}
+                <span class="status-pill ${escHtml(r.current_stock === 0 ? 'cancelled' : r.depletion_ratio <= 0.5 ? 'refunded' : 'completed')}">
+                  ${escHtml(r.urgency.replace(/_/g, " "))}
                 </span>
               </td>
-              <td class="text-center font-weight-bold">${r.suggested_order_quantity} Units</td>
+              <td class="text-center font-weight-bold">${escHtml(r.suggested_order_quantity)} Units</td>
               <td class="text-right font-weight-bold">₹${r.estimated_restock_cost.toFixed(2)}</td>
-              <td><span style="font-size: 11px;">${r.supplier}</span></td>
+              <td><span style="font-size: 11px;">${escHtml(r.supplier)}</span></td>
             </tr>
           `).join("");
         }
@@ -1844,7 +1956,7 @@ function initInventoryEvents() {
     };
 
     try {
-      const res = await fetch("/api/products", {
+      const res = await apiFetch("/api/products", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload)
@@ -1902,7 +2014,7 @@ function initInventoryEvents() {
 
 async function loadInventoryData() {
   try {
-    const res = await fetch("/api/products");
+    const res = await apiFetch("/api/products");
     state.inventoryProducts = await res.json();
     renderInventoryTable(state.inventoryProducts);
   } catch (err) {
@@ -1912,7 +2024,7 @@ async function loadInventoryData() {
 
 async function loadValuationData() {
   try {
-    const res = await fetch("/api/inventory/valuation");
+    const res = await apiFetch("/api/inventory/valuation");
     const val = await res.json();
     document.getElementById("val-skus-count").textContent = val.total_distinct_skus;
     document.getElementById("val-units-count").textContent = val.total_physical_units;
@@ -1944,28 +2056,28 @@ function renderInventoryTable(products) {
   const tbody = document.getElementById("inventory-tbody");
   tbody.innerHTML = products.map(p => `
     <tr>
-      <td><code>${p.barcode}</code></td>
-      <td><strong>${p.name}</strong><br><small style="color: var(--text-muted);">${p.brand}</small></td>
-      <td><span class="status-pill">${p.category}</span></td>
+      <td><code>${escHtml(p.barcode)}</code></td>
+      <td><strong>${escHtml(p.name)}</strong><br><small style="color: var(--text-muted);">${escHtml(p.brand)}</small></td>
+      <td><span class="status-pill">${escHtml(p.category)}</span></td>
       <td class="text-right">₹${p.cost_price.toFixed(2)}</td>
       <td class="text-right"><strong>₹${p.selling_price.toFixed(2)}</strong></td>
       <td class="text-right" style="color: var(--text-muted);">₹${p.mrp.toFixed(2)}</td>
       <td class="text-right" style="color: var(--success-dark); font-weight: 700;">₹${(p.selling_price - p.cost_price).toFixed(2)}</td>
-      <td class="text-center" style="${p.is_low_stock ? 'color: var(--danger-dark); font-weight: 800;' : ''}">
-        ${p.stock_quantity} ${p.unit}
+      <td class="text-center" style="${escHtml(p.is_low_stock ? 'color: var(--danger-dark); font-weight: 800;' : '')}">
+        ${escHtml(p.stock_quantity)} ${escHtml(p.unit)}
       </td>
       <td class="text-center">
-        ${p.is_out_of_stock 
+        ${escHtml(p.is_out_of_stock 
           ? '<span class="status-pill cancelled">OUT OF STOCK</span>' 
           : p.is_low_stock 
             ? '<span class="status-pill refunded">LOW STOCK</span>' 
-            : '<span class="status-pill completed">HEALTHY</span>'}
+            : '<span class="status-pill completed">HEALTHY</span>')}
       </td>
       <td class="text-center" style="white-space: nowrap;">
-        <button class="btn-secondary" style="padding: 4px 8px; font-size: 11px;" onclick="openStockAdjustModal('${p.barcode}', '${p.name.replace(/'/g, "\\'")}', ${p.stock_quantity})" title="Adjust Stock">
+        <button class="btn-secondary" style="padding: 4px 8px; font-size: 11px;" onclick="openStockAdjustModal('${escHtml(p.barcode)}', '${escHtml(p.name.replace(/'/g, "\\'"))}', ${escHtml(p.stock_quantity)})" title="Adjust Stock">
           <i class="fa-solid fa-sliders"></i>
         </button>
-        <button class="btn-secondary" style="padding: 4px 8px; font-size: 11px;" onclick="openShelfBarcodeTag('${p.barcode}')" title="Print Shelf Tag">
+        <button class="btn-secondary" style="padding: 4px 8px; font-size: 11px;" onclick="openShelfBarcodeTag('${escHtml(p.barcode)}')" title="Print Shelf Tag">
           <i class="fa-solid fa-barcode"></i>
         </button>
       </td>
@@ -1993,7 +2105,7 @@ async function submitStockAdjustment() {
   }
 
   try {
-    const res = await fetch("/api/inventory/adjust", {
+    const res = await apiFetch("/api/inventory/adjust", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -2023,7 +2135,7 @@ async function submitBulkCSVImport() {
   }
 
   try {
-    const res = await fetch("/api/inventory/import-csv", {
+    const res = await apiFetch("/api/inventory/import-csv", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ csv_content: csvContent })
@@ -2043,20 +2155,20 @@ async function submitBulkCSVImport() {
 
 window.openShelfBarcodeTag = async function(barcode) {
   try {
-    const res = await fetch(`/api/inventory/barcode/${barcode}`);
+    const res = await apiFetch(`/api/inventory/barcode/${barcode}`);
     const tag = await res.json();
 
     const container = document.getElementById("shelf-tag-container");
     container.innerHTML = `
       <div style="text-align: left; font-size: 11px; font-weight: 700; color: #1e3a8a;">APEX ENTERPRISE RETAIL</div>
-      <h2 style="margin: 8px 0; font-size: 16px;">${tag.name}</h2>
-      <div style="color: #64748b; font-size: 11px;">Category: ${tag.category} | SKU: ${tag.sku}</div>
+      <h2 style="margin: 8px 0; font-size: 16px;">${escHtml(tag.name)}</h2>
+      <div style="color: #64748b; font-size: 11px;">Category: ${escHtml(tag.category)} | SKU: ${escHtml(tag.sku)}</div>
       <div class="tag-price">₹${tag.selling_price.toFixed(2)}</div>
       <div style="font-size: 12px; color: #059669; font-weight: 700; margin-bottom: 8px;">
         MRP ₹${tag.mrp.toFixed(2)} (SAVE ₹${tag.save_amount.toFixed(2)})
       </div>
       <div class="tag-barcode">||| | ||||| || |||||| | |||</div>
-      <div style="font-family: var(--font-mono); font-size: 12px; letter-spacing: 2px;">${tag.barcode}</div>
+      <div style="font-family: var(--font-mono); font-size: 12px; letter-spacing: 2px;">${escHtml(tag.barcode)}</div>
     `;
 
     document.getElementById("shelf-tag-modal").classList.remove("hidden");
@@ -2086,33 +2198,33 @@ function initCustomerEvents() {
 
 async function loadCustomersData() {
   try {
-    const res = await fetch("/api/customers");
+    const res = await apiFetch("/api/customers");
     const customers = await res.json();
 
     const tbody = document.getElementById("customers-tbody");
     tbody.innerHTML = customers.map(c => `
       <tr>
-        <td><code class="membership-id-pill">${c.membership_code || ('MEM-' + c.phone)}</code></td>
-        <td><strong>${c.name}</strong></td>
-        <td><code>${c.phone}</code></td>
+        <td><code class="membership-id-pill">${escHtml(c.membership_code || ('MEM-' + c.phone))}</code></td>
+        <td><strong>${escHtml(c.name)}</strong></td>
+        <td><code>${escHtml(c.phone)}</code></td>
         <td class="text-center">
-          <strong style="color: var(--primary); font-size: 13px;">${c.visit_count} Visits</strong>
+          <strong style="color: var(--primary); font-size: 13px;">${escHtml(c.visit_count)} Visits</strong>
         </td>
         <td class="text-center">
-          <span class="tier-chip-badge ${c.tier.toLowerCase()}">${c.tier}</span>
+          <span class="tier-chip-badge ${escHtml(c.tier.toLowerCase())}">${escHtml(c.tier)}</span>
         </td>
-        <td class="text-center">⭐ ${c.loyalty_points}</td>
+        <td class="text-center">⭐ ${escHtml(c.loyalty_points)}</td>
         <td class="text-right">₹${c.total_spent.toFixed(2)}</td>
         <td class="text-right">₹${c.avg_basket.toFixed(2)}</td>
-        <td>${c.last_visited}</td>
+        <td>${escHtml(c.last_visited)}</td>
         <td class="text-center" style="white-space: nowrap;">
-          <button class="btn-secondary" style="padding: 4px 8px; font-size: 11px;" onclick="viewCustomerBills('${c.phone}', '${c.name.replace(/'/g, "\\'")}')" title="Order History">
+          <button class="btn-secondary" style="padding: 4px 8px; font-size: 11px;" onclick="viewCustomerBills('${escHtml(c.phone)}', '${escHtml(c.name.replace(/'/g, "\\'"))}')" title="Order History">
             <i class="fa-solid fa-receipt"></i>
           </button>
-          <button class="btn-secondary" style="padding: 4px 8px; font-size: 11px; margin-left: 3px;" onclick="showCustomerInsightsModal('${c.phone}')" title="Shopping Habits">
+          <button class="btn-secondary" style="padding: 4px 8px; font-size: 11px; margin-left: 3px;" onclick="showCustomerInsightsModal('${escHtml(c.phone)}')" title="Shopping Habits">
             <i class="fa-solid fa-chart-pie"></i>
           </button>
-          <button class="btn-secondary" style="padding: 4px 8px; font-size: 11px; margin-left: 3px;" onclick="viewCustomerCardByPhone('${c.phone}')" title="Membership Digital Card">
+          <button class="btn-secondary" style="padding: 4px 8px; font-size: 11px; margin-left: 3px;" onclick="viewCustomerCardByPhone('${escHtml(c.phone)}')" title="Membership Digital Card">
             <i class="fa-solid fa-id-card"></i>
           </button>
         </td>
@@ -2125,7 +2237,7 @@ async function loadCustomersData() {
 
 window.viewCustomerCardByPhone = async function(phone) {
   try {
-    const res = await fetch(`/api/customers/recognize?identifier=${encodeURIComponent(phone)}`);
+    const res = await apiFetch(`/api/customers/recognize?identifier=${encodeURIComponent(phone)}`);
     const data = await res.json();
     if (data.found) {
       window.showCustomerMemberCard(data);
@@ -2139,10 +2251,10 @@ window.viewCustomerCardByPhone = async function(phone) {
 
 window.viewCustomerBills = async function(phone, name) {
   try {
-    const res = await fetch(`/api/customers/${encodeURIComponent(phone)}/history`);
+    const res = await apiFetch(`/api/customers/${encodeURIComponent(phone)}/history`);
     const history = await res.json();
 
-    document.getElementById("history-modal-title").innerHTML = `<i class="fa-solid fa-clock-rotate-left"></i> ${name} (${phone}) - Order History`;
+    document.getElementById("history-modal-title").innerHTML = `<i class="fa-solid fa-clock-rotate-left"></i> ${escHtml(name)} (${escHtml(phone)}) - Order History`;
     const listContainer = document.getElementById("customer-history-list");
 
     if (!history || history.length === 0) {
@@ -2151,11 +2263,11 @@ window.viewCustomerBills = async function(phone, name) {
       listContainer.innerHTML = history.map(h => `
         <div class="card mb-10" style="padding: 12px; margin-bottom: 10px; background-color: var(--bg-surface-elevated);">
           <div style="display: flex; justify-content: space-between; font-weight: 700; font-size: 13px; margin-bottom: 6px;">
-            <span>Bill: ${h.bill_number} (${h.date})</span>
-            <span style="color: var(--success-dark);">Grand Total: ₹${h.grand_total.toFixed(2)} [${h.payment_method}]</span>
+            <span>Bill: ${escHtml(h.bill_number)} (${escHtml(h.date)})</span>
+            <span style="color: var(--success-dark);">Grand Total: ₹${h.grand_total.toFixed(2)} [${escHtml(h.payment_method)}]</span>
           </div>
           <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 6px;">
-            Items Count: ${h.items_count} | Total MRP Savings: ₹${h.savings.toFixed(2)} | Status: ${h.status}
+            Items Count: ${escHtml(h.items_count)} | Total MRP Savings: ₹${h.savings.toFixed(2)} | Status: ${escHtml(h.status)}
           </div>
           <ul style="padding-left: 20px; font-size: 12px;">
             ${h.items.map(i => `<li>${i.name} (Qty: ${i.quantity}) - ₹${i.total.toFixed(2)} ${i.is_returned ? '<span class="status-pill refunded" style="font-size: 8px;">RETURNED</span>' : ''}</li>`).join("")}
@@ -2199,7 +2311,7 @@ function initExpenseEvents() {
     };
 
     try {
-      const res = await fetch("/api/expenses", {
+      const res = await apiFetch("/api/expenses", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload)
@@ -2219,7 +2331,7 @@ function initExpenseEvents() {
 async function loadExpenseSummary() {
   try {
     const branchId = state.activeBranch ? state.activeBranch.id : "BR-DEL-01";
-    const res = await fetch(`/api/expenses/summary?branch_id=${branchId}`);
+    const res = await apiFetch(`/api/expenses/summary?branch_id=${branchId}`);
     const summary = await res.json();
     document.getElementById("exp-total-weekly").textContent = `₹${summary.weekly_total.toFixed(2)}`;
     document.getElementById("exp-total-monthly").textContent = `₹${summary.monthly_total.toFixed(2)}`;
@@ -2232,20 +2344,20 @@ async function loadExpenseSummary() {
 async function loadExpensesData() {
   try {
     const branchId = state.activeBranch ? state.activeBranch.id : "BR-DEL-01";
-    const res = await fetch(`/api/expenses?branch_id=${branchId}`);
+    const res = await apiFetch(`/api/expenses?branch_id=${branchId}`);
     const expenses = await res.json();
 
     const tbody = document.getElementById("expenses-tbody");
     tbody.innerHTML = expenses.map(e => `
       <tr>
-        <td>${e.expense_date}</td>
-        <td><span class="status-pill">${e.category}</span></td>
-        <td><strong>${e.description}</strong></td>
-        <td>${e.payment_mode}</td>
-        <td>${e.vendor_name || 'Store'}</td>
+        <td>${escHtml(e.expense_date)}</td>
+        <td><span class="status-pill">${escHtml(e.category)}</span></td>
+        <td><strong>${escHtml(e.description)}</strong></td>
+        <td>${escHtml(e.payment_mode)}</td>
+        <td>${escHtml(e.vendor_name || 'Store')}</td>
         <td class="text-right"><strong>₹${e.amount.toFixed(2)}</strong></td>
         <td class="text-center">
-          <button class="btn-secondary" style="padding: 4px 8px; font-size: 11px; color: var(--danger-dark);" onclick="deleteExpenseItem('${e.id}')">
+          <button class="btn-secondary" style="padding: 4px 8px; font-size: 11px; color: var(--danger-dark);" onclick="deleteExpenseItem('${escHtml(e.id)}')">
             <i class="fa-solid fa-trash-can"></i>
           </button>
         </td>
@@ -2259,7 +2371,7 @@ async function loadExpensesData() {
 window.deleteExpenseItem = async function(id) {
   if (confirm("Are you sure you want to delete this expense record?")) {
     try {
-      await fetch(`/api/expenses/${id}`, { method: "DELETE" });
+      await apiFetch(`/api/expenses/${id}`, { method: "DELETE" });
       showToast("Expense record removed", "info");
       loadExpensesData();
       loadExpenseSummary();
@@ -2322,7 +2434,7 @@ function initBranchEvents() {
       };
 
       try {
-        const res = await fetch("/api/branches", {
+        const res = await apiFetch("/api/branches", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload)
@@ -2373,7 +2485,7 @@ function initBranchEvents() {
       }
 
       try {
-        const res = await fetch("/api/inventory/transfer", {
+        const res = await apiFetch("/api/inventory/transfer", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -2409,19 +2521,19 @@ function populateTransferModalDropdowns() {
   const prodSel = document.getElementById("transfer-product-select");
 
   if (fromSel && state.branches.length > 0) {
-    fromSel.innerHTML = state.branches.map(b => `<option value="${b.id}" ${b.id === state.activeBranch.id ? 'selected' : ''}>${b.name} (${b.code})</option>`).join("");
+    fromSel.innerHTML = state.branches.map(b => `<option value="${escHtml(b.id)}" ${escHtml(b.id === state.activeBranch.id ? 'selected' : '')}>${escHtml(b.name)} (${escHtml(b.code)})</option>`).join("");
   }
   if (toSel && state.branches.length > 0) {
-    toSel.innerHTML = state.branches.map((b, idx) => `<option value="${b.id}" ${b.id !== state.activeBranch.id ? 'selected' : ''}>${b.name} (${b.code})</option>`).join("");
+    toSel.innerHTML = state.branches.map((b, idx) => `<option value="${escHtml(b.id)}" ${escHtml(b.id !== state.activeBranch.id ? 'selected' : '')}>${escHtml(b.name)} (${escHtml(b.code)})</option>`).join("");
   }
   if (prodSel && state.allProducts.length > 0) {
-    prodSel.innerHTML = state.allProducts.map(p => `<option value="${p.barcode}">${p.name} (Barcode: ${p.barcode} | Current Stock: ${p.stock_quantity})</option>`).join("");
+    prodSel.innerHTML = state.allProducts.map(p => `<option value="${escHtml(p.barcode)}">${escHtml(p.name)} (Barcode: ${escHtml(p.barcode)} | Current Stock: ${escHtml(p.stock_quantity)})</option>`).join("");
   }
 }
 
 async function loadBranchesData() {
   try {
-    const res = await fetch("/api/branches");
+    const res = await apiFetch("/api/branches");
     const branches = await res.json();
     state.branches = branches;
 
@@ -2429,8 +2541,8 @@ async function loadBranchesData() {
     const bSelect = document.getElementById("active-branch-select");
     if (bSelect) {
       bSelect.innerHTML = branches.map(b => `
-        <option value="${b.id}" ${b.id === state.activeBranch.id ? 'selected' : ''}>
-          ${b.name} (${b.code})
+        <option value="${escHtml(b.id)}" ${escHtml(b.id === state.activeBranch.id ? 'selected' : '')}>
+          ${escHtml(b.name)} (${escHtml(b.code)})
         </option>
       `).join("");
     }
@@ -2446,18 +2558,18 @@ async function loadBranchesData() {
     const cardsContainer = document.getElementById("branch-cards-grid");
     if (cardsContainer) {
       cardsContainer.innerHTML = branches.map(b => `
-        <div class="branch-card ${b.id === state.activeBranch.id ? 'active-store' : ''}">
+        <div class="branch-card ${escHtml(b.id === state.activeBranch.id ? 'active-store' : '')}">
           <div class="branch-card-header">
             <div class="branch-card-icon">
               <i class="fa-solid fa-store"></i>
             </div>
-            <span class="branch-badge ${b.is_headquarters ? 'hq' : 'retail'}">
-              ${b.is_headquarters ? 'Flagship / HQ' : 'Retail Branch'}
+            <span class="branch-badge ${escHtml(b.is_headquarters ? 'hq' : 'retail')}">
+              ${escHtml(b.is_headquarters ? 'Flagship / HQ' : 'Retail Branch')}
             </span>
           </div>
           <div class="branch-card-body">
-            <h3>${b.name}</h3>
-            <p><i class="fa-solid fa-location-dot"></i> ${b.address}, ${b.city}, ${b.state} (${b.pincode})</p>
+            <h3>${escHtml(b.name)}</h3>
+            <p><i class="fa-solid fa-location-dot"></i> ${escHtml(b.address)}, ${escHtml(b.city)}, ${escHtml(b.state)} (${escHtml(b.pincode)})</p>
             <div class="branch-metrics-row">
               <div class="branch-metric-box">
                 <span class="metric-label">Completed Sales</span>
@@ -2465,17 +2577,17 @@ async function loadBranchesData() {
               </div>
               <div class="branch-metric-box">
                 <span class="metric-label">Orders Billed</span>
-                <span class="metric-val">${b.orders_count || 0} Bills</span>
+                <span class="metric-val">${escHtml(b.orders_count || 0)} Bills</span>
               </div>
             </div>
           </div>
           <div class="branch-card-footer">
             <div class="branch-manager-tag">
               <i class="fa-solid fa-user-shield"></i>
-              <span>Mgr: ${b.manager_name || 'Store Manager'}</span>
+              <span>Mgr: ${escHtml(b.manager_name || 'Store Manager')}</span>
             </div>
-            <button class="btn-sm btn-primary" onclick="switchToBranch('${b.id}')">
-              ${b.id === state.activeBranch.id ? '<i class="fa-solid fa-check"></i> Active Store' : 'Switch Store'}
+            <button class="btn-sm btn-primary" onclick="switchToBranch('${escHtml(b.id)}')">
+              ${escHtml(b.id === state.activeBranch.id ? '<i class="fa-solid fa-check"></i> Active Store' : 'Switch Store')}
             </button>
           </div>
         </div>
@@ -2487,17 +2599,17 @@ async function loadBranchesData() {
     if (tbody) {
       tbody.innerHTML = branches.map(b => `
         <tr>
-          <td><strong>${b.code}</strong></td>
-          <td><strong>${b.name}</strong></td>
-          <td><span class="branch-badge ${b.is_headquarters ? 'hq' : 'retail'}">${b.is_headquarters ? 'Flagship / HQ' : 'Retail Store'}</span></td>
-          <td>${b.city}, ${b.state}</td>
-          <td>${b.manager_name || 'N/A'}</td>
-          <td class="text-right"><strong>${b.orders_count || 0}</strong></td>
+          <td><strong>${escHtml(b.code)}</strong></td>
+          <td><strong>${escHtml(b.name)}</strong></td>
+          <td><span class="branch-badge ${escHtml(b.is_headquarters ? 'hq' : 'retail')}">${escHtml(b.is_headquarters ? 'Flagship / HQ' : 'Retail Store')}</span></td>
+          <td>${escHtml(b.city)}, ${escHtml(b.state)}</td>
+          <td>${escHtml(b.manager_name || 'N/A')}</td>
+          <td class="text-right"><strong>${escHtml(b.orders_count || 0)}</strong></td>
           <td class="text-right"><strong>₹${(b.total_sales || 0).toFixed(2)}</strong></td>
           <td><span class="status-pill completed">OPERATIONAL</span></td>
           <td>
-            <button class="btn-sm btn-secondary" onclick="switchToBranch('${b.id}')">
-              ${b.id === state.activeBranch.id ? 'Selected' : 'Operate Here'}
+            <button class="btn-sm btn-secondary" onclick="switchToBranch('${escHtml(b.id)}')">
+              ${escHtml(b.id === state.activeBranch.id ? 'Selected' : 'Operate Here')}
             </button>
           </td>
         </tr>
@@ -2533,7 +2645,7 @@ function showToast(message, type = "success") {
   const toast = document.createElement("div");
   toast.className = `toast ${type}`;
   const icon = type === "success" ? "fa-circle-check" : type === "error" ? "fa-circle-exclamation" : "fa-circle-info";
-  toast.innerHTML = `<i class="fa-solid ${icon}"></i> <span>${message}</span>`;
+  toast.innerHTML = `<i class="fa-solid ${escHtml(icon)}"></i> <span>${escHtml(message)}</span>`;
   container.appendChild(toast);
 
   setTimeout(() => {
