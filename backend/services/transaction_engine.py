@@ -10,6 +10,8 @@ Enforces strict ACID transaction boundaries across:
 - Customer returns, refunds, and bill voiding
 """
 
+import html as _html
+
 from datetime import datetime, date
 from decimal import Decimal
 import time
@@ -759,7 +761,14 @@ class POSTransactionEngine:
         return "\n".join(lines)
 
     def format_a4_tax_invoice(self, order: Order, customer: Optional[Customer]) -> str:
-        """Renders a formal A4 GST Tax Invoice layout in clean HTML with branch-specific details."""
+        """Renders a formal A4 GST Tax Invoice layout in clean HTML with branch-specific details.
+
+        SECURITY: every user-controlled value (product names, barcodes, customer
+        name/phone, cashier, notes, branch fields) is HTML-escaped before being
+        interpolated into the invoice markup to prevent stored XSS on the POS
+        terminal and any browser that renders the A4 invoice.
+        """
+        e = lambda v: _html.escape(str(v if v is not None else ""), quote=True)
         sym = STORE_PROFILE.currency_symbol
         half_tax = round_curr(order.total_tax / Decimal("2.0"))
 
@@ -779,8 +788,8 @@ class POSTransactionEngine:
             <tr>
                 <td style="text-align: center; border: 1px solid #cbd5e1; padding: 6px;">{idx}</td>
                 <td style="border: 1px solid #cbd5e1; padding: 6px;">
-                    <strong>{itm.product_name}</strong><br>
-                    <small style="color: #64748b;">Barcode: {itm.barcode}</small>
+                    <strong>{e(itm.product_name)}</strong><br>
+                    <small style="color: #64748b;">Barcode: {e(itm.barcode)}</small>
                 </td>
                 <td style="text-align: center; border: 1px solid #cbd5e1; padding: 6px;">{itm.quantity} {itm.unit}</td>
                 <td style="text-align: right; border: 1px solid #cbd5e1; padding: 6px;">{sym}{itm.unit_mrp:.2f}</td>
@@ -794,15 +803,15 @@ class POSTransactionEngine:
         <div style="font-family: Arial, sans-serif; max-width: 800px; margin: auto; padding: 20px; border: 2px solid #0f172a; color: #0f172a; background: #fff;">
             <div style="display: flex; justify-content: space-between; border-bottom: 2px solid #0f172a; padding-bottom: 12px; margin-bottom: 15px;">
                 <div>
-                    <h2 style="margin: 0; color: #1e3a8a;">{store_name}</h2>
+                    <h2 style="margin: 0; color: #1e3a8a;">{e(store_name)}</h2>
                     <p style="margin: 3px 0; font-size: 12px;">{STORE_PROFILE.tagline}</p>
-                    <p style="margin: 3px 0; font-size: 11px;">{addr1}, {addr2}</p>
-                    <p style="margin: 3px 0; font-size: 11px;"><strong>GSTIN:</strong> {store_gstin} | <strong>FSSAI:</strong> {STORE_PROFILE.fssai_license} | <strong>Tel:</strong> {store_phone}</p>
+                    <p style="margin: 3px 0; font-size: 11px;">{e(addr1)}, {e(addr2)}</p>
+                    <p style="margin: 3px 0; font-size: 11px;"><strong>GSTIN:</strong> {e(store_gstin)} | <strong>FSSAI:</strong> {STORE_PROFILE.fssai_license} | <strong>Tel:</strong> {e(store_phone)}</p>
                 </div>
                 <div style="text-align: right;">
                     <h3 style="margin: 0; color: #2563eb;">TAX INVOICE</h3>
-                    <p style="margin: 3px 0; font-size: 12px;"><strong>Invoice No:</strong> {order.bill_number}</p>
-                    <p style="margin: 3px 0; font-size: 12px;"><strong>Branch:</strong> {order.branch_name or 'Main Store'} ({order.branch_id or 'BR-01'})</p>
+                    <p style="margin: 3px 0; font-size: 12px;"><strong>Invoice No:</strong> {e(order.bill_number)}</p>
+                    <p style="margin: 3px 0; font-size: 12px;"><strong>Branch:</strong> {e(order.branch_name or 'Main Store')} ({e(order.branch_id or 'BR-01')})</p>
                     <p style="margin: 3px 0; font-size: 12px;"><strong>Date:</strong> {order.created_at.strftime('%d-%b-%Y %I:%M %p')}</p>
                     <p style="margin: 3px 0; font-size: 12px;"><strong>Status:</strong> {order.status.value}</p>
                 </div>
@@ -811,14 +820,14 @@ class POSTransactionEngine:
             <div style="display: flex; justify-content: space-between; background: #f8fafc; padding: 10px; border-radius: 6px; margin-bottom: 15px; font-size: 12px;">
                 <div>
                     <strong>Billed To:</strong><br>
-                    Name: {order.customer_name}<br>
-                    Phone: {order.customer_phone or 'Walk-in Consumer'}<br>
+                    Name: {e(order.customer_name)}<br>
+                    Phone: {e(order.customer_phone or 'Walk-in Consumer')}<br>
                     Customer Tier: {order.customer_tier.value}
                 </div>
                 <div>
                     <strong>Payment & Cashier:</strong><br>
                     Payment Mode: {order.payment_method.value}<br>
-                    Cashier ID: {order.cashier_name} ({order.cashier_id})
+                    Cashier ID: {e(order.cashier_name)} ({e(order.cashier_id)})
                 </div>
             </div>
 

@@ -548,7 +548,7 @@ def list_all_products():
 
 
 @app.post("/api/products")
-def create_or_update_product(req: ProductCreateRequest):
+def create_or_update_product(req: ProductCreateRequest, actor: User = Depends(require_staff)):
     prod = Product(
         barcode=req.barcode,
         sku=req.sku,
@@ -571,7 +571,7 @@ def create_or_update_product(req: ProductCreateRequest):
 
 # --- CUSTOMER TRACKING & FOOTFALL INTELLIGENCE ---
 @app.get("/api/customers/recognize")
-def smart_recognize_customer(identifier: str = Query(..., description="Customer mobile number or membership QR code")):
+def smart_recognize_customer(identifier: str = Query(..., description="Customer mobile number or membership QR code"), actor: User = Depends(require_staff)):
     """
     Smart Customer Recognition:
     Instantly identifies returning customers using their phone number or membership QR code,
@@ -589,7 +589,7 @@ def smart_recognize_customer(identifier: str = Query(..., description="Customer 
 
 
 @app.get("/api/customers/lookup")
-def lookup_customer(phone: str = Query(..., description="Customer mobile number or membership code")):
+def lookup_customer(phone: str = Query(..., description="Customer mobile number or membership code"), actor: User = Depends(require_staff)):
     data = customer_service.smart_recognize_customer(phone)
     if not data:
         return {"exists": False, "phone": phone}
@@ -614,17 +614,17 @@ def lookup_customer(phone: str = Query(..., description="Customer mobile number 
 
 
 @app.get("/api/customers")
-def list_customers():
+def list_customers(actor: User = Depends(require_staff)):
     return customer_service.list_top_frequent_customers(limit=100)
 
 
 @app.get("/api/customers/top")
-def get_top_customers(limit: int = 20):
+def get_top_customers(limit: int = 20, actor: User = Depends(require_staff)):
     return {"top_customers": customer_service.list_top_frequent_customers(limit=limit)}
 
 
 @app.get("/api/customers/{identifier}/insights")
-def get_customer_insights(identifier: str):
+def get_customer_insights(identifier: str, actor: User = Depends(require_staff)):
     """Deep shopping insights: category preferences, favorite products, and past order history."""
     cust = customer_service.lookup_customer(identifier)
     if not cust:
@@ -633,7 +633,7 @@ def get_customer_insights(identifier: str):
 
 
 @app.get("/api/customers/{phone}/history")
-def get_customer_history(phone: str):
+def get_customer_history(phone: str, actor: User = Depends(require_staff)):
     orders = repo.list_orders_by_customer(phone)
     return [
         {
@@ -662,7 +662,7 @@ def get_customer_history(phone: str):
 
 # --- POINT OF SALE CHECKOUT ---
 @app.post("/api/pos/calculate")
-def calculate_cart(req: CartCalculationRequest):
+def calculate_cart(req: CartCalculationRequest, actor: User = Depends(require_staff)):
     # Resolve customer phone if membership code or QR was provided
     resolved_phone = req.customer_phone
     if resolved_phone:
@@ -680,7 +680,7 @@ def calculate_cart(req: CartCalculationRequest):
 
 
 @app.post("/api/pos/checkout")
-def checkout_sale(req: CheckoutRequest):
+def checkout_sale(req: CheckoutRequest, actor: User = Depends(require_staff)):
     # Resolve customer phone if membership code or QR was provided
     resolved_phone = req.customer_phone
     resolved_name = req.customer_name
@@ -707,7 +707,7 @@ def checkout_sale(req: CheckoutRequest):
 
 
 @app.get("/api/orders")
-def list_recent_orders(branch_id: Optional[str] = Query(None)):
+def list_recent_orders(branch_id: Optional[str] = Query(None), actor: User = Depends(require_staff)):
     target_branch = None if (not branch_id or branch_id.upper() == "ALL") else branch_id.strip()
     orders = repo.list_orders(limit=60, branch_id=target_branch)
     return [
@@ -729,7 +729,7 @@ def list_recent_orders(branch_id: Optional[str] = Query(None)):
 
 
 @app.get("/api/orders/{bill_number}")
-def get_order_details(bill_number: str):
+def get_order_details(bill_number: str, actor: User = Depends(require_staff)):
     order = repo.get_order_by_bill_number(bill_number)
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
@@ -773,7 +773,7 @@ def get_order_details(bill_number: str):
 
 
 @app.get("/api/orders/{bill_number}/thermal")
-def get_thermal_receipt(bill_number: str):
+def get_thermal_receipt(bill_number: str, actor: User = Depends(require_staff)):
     order = repo.get_order_by_bill_number(bill_number)
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
@@ -783,7 +783,7 @@ def get_thermal_receipt(bill_number: str):
 
 
 @app.get("/api/orders/{bill_number}/a4")
-def get_a4_tax_invoice(bill_number: str):
+def get_a4_tax_invoice(bill_number: str, actor: User = Depends(require_staff)):
     order = repo.get_order_by_bill_number(bill_number)
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
@@ -793,13 +793,13 @@ def get_a4_tax_invoice(bill_number: str):
 
 
 @app.post("/api/orders/{bill_number}/void")
-def void_bill(bill_number: str, req: VoidOrderRequest):
+def void_bill(bill_number: str, req: VoidOrderRequest, actor: User = Depends(require_manager)):
     return pos_service.void_order(bill_number, req.manager_pin, req.reason)
 
 
 # --- RETURNS & REFUNDS ---
 @app.post("/api/returns/process")
-def process_customer_return(req: ProcessReturnRequest):
+def process_customer_return(req: ProcessReturnRequest, actor: User = Depends(require_manager)):
     items = [{"barcode": i.barcode, "quantity": i.quantity} for i in req.items]
     return returns_service.process_return(
         bill_number=req.bill_number,
@@ -811,7 +811,7 @@ def process_customer_return(req: ProcessReturnRequest):
 
 
 @app.get("/api/returns")
-def list_returns(branch_id: Optional[str] = Query(None)):
+def list_returns(branch_id: Optional[str] = Query(None), actor: User = Depends(require_staff)):
     target_branch = None if (not branch_id or branch_id.upper() == "ALL") else branch_id.strip()
     returns = repo.list_returns(limit=50, branch_id=target_branch)
     return [
@@ -832,12 +832,12 @@ def list_returns(branch_id: Optional[str] = Query(None)):
 
 # --- CASH REGISTER & SHIFT MANAGEMENT (Z-REPORT) ---
 @app.get("/api/shifts/current")
-def get_current_shift(cashier_id: str = Query("CASHIER-01")):
+def get_current_shift(cashier_id: str = Query("CASHIER-01"), actor: User = Depends(require_staff)):
     return register_service.get_current_shift_status(cashier_id)
 
 
 @app.post("/api/shifts/start")
-def start_cashier_shift(req: StartShiftRequest):
+def start_cashier_shift(req: StartShiftRequest, actor: User = Depends(require_staff)):
     shift = register_service.start_shift(
         cashier_id=req.cashier_id,
         cashier_name=req.cashier_name,
@@ -856,7 +856,7 @@ def start_cashier_shift(req: StartShiftRequest):
 
 
 @app.post("/api/shifts/drop")
-def record_shift_cash_drop(req: CashDropRequest):
+def record_shift_cash_drop(req: CashDropRequest, actor: User = Depends(require_staff)):
     try:
         return register_service.record_cash_drop(
             cashier_id=req.cashier_id,
@@ -864,11 +864,11 @@ def record_shift_cash_drop(req: CashDropRequest):
             reason=req.reason
         )
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise _safe_http_error(e, "Request could not be processed due to a server-side validation error.")
 
 
 @app.post("/api/shifts/close")
-def close_shift_and_generate_z_report(req: CloseShiftRequest):
+def close_shift_and_generate_z_report(req: CloseShiftRequest, actor: User = Depends(require_manager)):
     try:
         return register_service.close_shift_z_report(
             cashier_id=req.cashier_id,
@@ -876,11 +876,11 @@ def close_shift_and_generate_z_report(req: CloseShiftRequest):
             closing_notes=req.notes
         )
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise _safe_http_error(e, "Request could not be processed due to a server-side validation error.")
 
 
 @app.get("/api/shifts/history")
-def list_shift_history():
+def list_shift_history(actor: User = Depends(require_manager)):
     shifts = repo.list_shifts(limit=30)
     return [
         {
@@ -907,7 +907,7 @@ def list_shift_history():
 
 # --- INVENTORY & STOCK OPERATIONS ---
 @app.post("/api/inventory/adjust")
-def adjust_inventory_stock(req: StockAdjustmentRequest):
+def adjust_inventory_stock(req: StockAdjustmentRequest, actor: User = Depends(require_inventory)):
     try:
         return inventory_service.adjust_stock(
             barcode=req.barcode,
@@ -917,7 +917,7 @@ def adjust_inventory_stock(req: StockAdjustmentRequest):
             branch_id=req.branch_id,
         )
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise _safe_http_error(e, "Request could not be processed due to a server-side validation error.")
 
 
 @app.get("/api/inventory/valuation")
@@ -936,15 +936,15 @@ def export_catalog_csv():
 
 
 @app.post("/api/inventory/import-csv")
-def import_catalog_csv(req: BulkCSVImportRequest):
+def import_catalog_csv(req: BulkCSVImportRequest, actor: User = Depends(require_inventory)):
     try:
         return inventory_service.import_catalog_from_csv(req.csv_content)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise _safe_http_error(e, "Request could not be processed due to a server-side validation error.")
 
 
 @app.get("/api/inventory/movements")
-def list_stock_movements(limit: int = 50, branch_id: Optional[str] = Query(None)):
+def list_stock_movements(limit: int = 50, branch_id: Optional[str] = Query(None), actor: User = Depends(require_staff)):
     target_branch = None if (not branch_id or branch_id.upper() == "ALL") else branch_id.strip()
     movements = repo.list_stock_movements(limit=limit, branch_id=target_branch)
     return [
@@ -969,17 +969,17 @@ def get_barcode_shelf_tag(barcode: str):
     try:
         return inventory_service.generate_shelf_barcode_tag(barcode)
     except Exception as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise _safe_http_error(e, "Request could not be processed due to a server-side validation error.")
 
 
 # --- EXPENSE TRACKING (WEEKLY, MONTHLY, YEARLY) ---
 @app.get("/api/expenses")
-def list_expenses(branch_id: Optional[str] = Query(None)):
+def list_expenses(branch_id: Optional[str] = Query(None), actor: User = Depends(require_staff)):
     return expense_service.list_expenses(limit=100, branch_id=branch_id)
 
 
 @app.get("/api/expenses/summary")
-def get_expenses_summary(branch_id: Optional[str] = Query(None)):
+def get_expenses_summary(branch_id: Optional[str] = Query(None), actor: User = Depends(require_staff)):
     data = expense_service.get_periodic_expense_summary(branch_id=branch_id)
     data["weekly_total"] = data["totals"]["weekly_expenses"]
     data["monthly_total"] = data["totals"]["monthly_expenses"]
@@ -989,7 +989,7 @@ def get_expenses_summary(branch_id: Optional[str] = Query(None)):
 
 
 @app.post("/api/expenses")
-def create_expense(req: ExpenseCreateRequest):
+def create_expense(req: ExpenseCreateRequest, actor: User = Depends(require_manager)):
     exp = expense_service.add_expense(
         category=req.category,
         amount=req.amount,
@@ -1004,7 +1004,7 @@ def create_expense(req: ExpenseCreateRequest):
 
 
 @app.delete("/api/expenses/{expense_id}")
-def delete_expense(expense_id: str):
+def delete_expense(expense_id: str, actor: User = Depends(require_manager)):
     success = expense_service.delete_expense(expense_id)
     if not success:
         raise HTTPException(status_code=404, detail="Expense not found")
@@ -1013,7 +1013,7 @@ def delete_expense(expense_id: str):
 
 # --- STORE EXECUTIVE DASHBOARD & P&L ANALYTICS ---
 @app.get("/api/dashboard")
-def get_dashboard_data(branch_id: Optional[str] = Query(None)):
+def get_dashboard_data(branch_id: Optional[str] = Query(None), actor: User = Depends(require_staff)):
     metrics = analytics_service.get_dashboard_metrics(branch_id=branch_id)
     w = metrics.get("weekly", {})
     metrics["total_revenue"] = w.get("revenue", 0.0)
@@ -1032,7 +1032,7 @@ def get_dashboard_data(branch_id: Optional[str] = Query(None)):
 
 
 @app.get("/api/analytics/business-intelligence")
-def get_business_intelligence(branch_id: Optional[str] = Query(None)):
+def get_business_intelligence(branch_id: Optional[str] = Query(None), actor: User = Depends(require_manager)):
     """
     Comprehensive Business Intelligence API:
     - Best-selling products (Volume, Revenue, Profit Margin %)
@@ -1077,7 +1077,7 @@ def list_store_branches():
 
 
 @app.post("/api/branches")
-def create_store_branch(req: BranchCreateRequest):
+def create_store_branch(req: BranchCreateRequest, actor: User = Depends(require_manager)):
     """Registers a new physical store branch in the multi-branch network."""
     from backend.models.domain import StoreBranch
     clean_code = req.code.upper().strip()
@@ -1144,7 +1144,7 @@ def get_branch_inventory(branch_id: str):
 
 
 @app.post("/api/inventory/transfer")
-def transfer_inventory_between_branches(req: InterBranchTransferRequest):
+def transfer_inventory_between_branches(req: InterBranchTransferRequest, actor: User = Depends(require_inventory)):
     try:
         return inventory_service.transfer_stock(
             from_branch_id=req.from_branch_id,
@@ -1155,12 +1155,12 @@ def transfer_inventory_between_branches(req: InterBranchTransferRequest):
             user_id=req.user_id,
         )
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise _safe_http_error(e, "Request could not be processed due to a server-side validation error.")
 
 
 # --- USERS & AUTH ---
 @app.get("/api/auth/users")
-def get_store_users():
+def get_store_users(actor: User = Depends(require_manager)):
     users = repo.list_users()
     return [
         {
@@ -1174,28 +1174,38 @@ def get_store_users():
 
 
 @app.post("/api/auth/verify-pin")
-def verify_manager_pin(req: VerifyPinRequest):
+def verify_manager_pin(req: VerifyPinRequest, actor: User = Depends(get_current_user)):
+    """Verify a staff member's PIN against HASHED credentials only.
+
+    SECURITY: There is deliberately NO hardcoded universal override PIN.
+    A match must come from a real, active provisioned user whose stored
+    credential passes constant-time hash verification, and whose role is
+    within the caller-declared allowed_roles set. The requesting session
+    must itself be an authenticated supervisor-or-above operator.
+    """
     users = repo.list_users()
     matched = None
     for u in users:
-        if u.verify_pin(req.pin):
+        if not u.is_active:
+            continue
+        ok, new_hash = u.verify_and_upgrade_pin(req.pin)
+        if ok:
+            if new_hash:
+                repo.upgrade_user_pin_hash(u.id, u.pin)
             if req.allowed_roles is None or u.role.value in req.allowed_roles:
                 matched = u
                 break
-    
-    # Fallback default manager/admin PINs
-    if not matched and req.pin in ["2222", "9999"]:
-        return {"valid": True, "role": "STORE_MANAGER", "name": "Manager Override"}
-    
+
     if matched:
+        logger.info("PIN override authorized by %s for user %s (%s)", actor.username, matched.username, matched.role.value)
         return {"valid": True, "role": matched.role.value, "name": matched.full_name}
-    
+
     return {"valid": False, "role": None, "name": None}
 
 
 # --- CSV EXPORT REPORTS ---
 @app.get("/api/reports/sales-csv")
-def export_sales_report_csv():
+def export_sales_report_csv(actor: User = Depends(require_manager)):
     orders = repo.list_orders(limit=500)
     output = io.StringIO()
     writer = csv.writer(output)
@@ -1227,7 +1237,7 @@ def export_sales_report_csv():
 
 
 @app.get("/api/reports/expenses-csv")
-def export_expenses_report_csv():
+def export_expenses_report_csv(actor: User = Depends(require_manager)):
     expenses = repo.list_expenses(limit=500)
     output = io.StringIO()
     writer = csv.writer(output)
